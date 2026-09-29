@@ -5,7 +5,7 @@ wallets:
   - id: live_cross_market_arb
     mode: LIVE
     strategy: cross_market_arbitrage
-    capital: 100
+    capital: 25
     risk_limits:
       max_position_size: 20
       max_exposure_per_market: 30
@@ -16,12 +16,12 @@ wallets:
   - id: wallet_2
     mode: PAPER
     strategy: ai_forecast
-    capital: 500
+    capital: 25
 
   - id: wallet_3
     mode: PAPER
     strategy: market_making
-    capital: 300
+    capital: 25
     risk_limits:
       max_position_size: 60
       max_exposure_per_market: 100
@@ -32,7 +32,7 @@ wallets:
   - id: wallet_4
     mode: PAPER
     strategy: filtered_high_prob_convergence
-    capital: 2000
+    capital: 25
     risk_limits:
       max_position_size: 500
       max_exposure_per_market: 400
@@ -44,7 +44,7 @@ wallets:
   - id: paper_cross_market_arb
     mode: PAPER
     strategy: cross_market_arbitrage
-    capital: 10000
+    capital: 25
     risk_limits:
       max_position_size: 500
       max_exposure_per_market: 1000
@@ -55,7 +55,7 @@ wallets:
   - id: paper_mispricing_arb
     mode: PAPER
     strategy: mispricing_arbitrage
-    capital: 10000
+    capital: 25
     risk_limits:
       max_position_size: 500
       max_exposure_per_market: 1000
@@ -66,7 +66,7 @@ wallets:
   - id: paper_ai_forecast
     mode: PAPER
     strategy: ai_forecast
-    capital: 10000
+    capital: 25
     risk_limits:
       max_position_size: 500
       max_exposure_per_market: 1000
@@ -77,7 +77,7 @@ wallets:
   - id: paper_market_making
     mode: PAPER
     strategy: market_making
-    capital: 10000
+    capital: 25
     risk_limits:
       max_position_size: 500
       max_exposure_per_market: 1000
@@ -88,7 +88,7 @@ wallets:
   - id: paper_momentum
     mode: PAPER
     strategy: momentum
-    capital: 10000
+    capital: 25
     risk_limits:
       max_position_size: 500
       max_exposure_per_market: 1000
@@ -99,7 +99,7 @@ wallets:
   - id: paper_user_defined
     mode: PAPER
     strategy: user_defined
-    capital: 10000
+    capital: 25
     risk_limits:
       max_position_size: 500
       max_exposure_per_market: 1000
@@ -110,7 +110,7 @@ wallets:
   - id: paper_convergence
     mode: PAPER
     strategy: filtered_high_prob_convergence
-    capital: 10000
+    capital: 25
     risk_limits:
       max_position_size: 500
       max_exposure_per_market: 1000
@@ -121,7 +121,7 @@ wallets:
   - id: paper_copy_trade
     mode: PAPER
     strategy: copy_trade
-    capital: 10000
+    capital: 25
     risk_limits:
       max_position_size: 500
       max_exposure_per_market: 500
@@ -189,9 +189,9 @@ strategy_config:
     max_trade_size_usd: 100000
     min_whale_win_rate: 0.50
     # ── Position Sizing ──
-    size_mode: fixed                    # fixed | proportional | kelly
+    size_mode: fixed # fixed | proportional | kelly
     fixed_size: 10
-    proportional_factor: 0.10          # when size_mode = proportional
+    proportional_factor: 0.10 # when size_mode = proportional
     max_capital_per_trade_pct: 0.05
     max_shares_per_order: 50
     # ── Risk / Exposure ──
@@ -226,7 +226,7 @@ whale_tracking:
   # Ingestion
   pollIntervalMs: 30000
   backfillBatchSize: 100
-  maxRequestsPerMinute: 240             # ← doubled for parallel scanning throughput
+  maxRequestsPerMinute: 240 # ← doubled for parallel scanning throughput
   backoffBaseMs: 1000
   backoffMaxMs: 60000
 
@@ -250,7 +250,7 @@ whale_tracking:
   costBasisMethod: FIFO
 
   # Timing windows (minutes)
-  timingWindows: [5, 30, 240, 1440]
+  timingWindows: [ 5, 30, 240, 1440 ]
 
   # Alerts
   alertDigestIntervalMs: 60000
@@ -281,37 +281,37 @@ whale_tracking:
   # Scanner — auto-discover profitable whales from liquid markets
   scanner:
     enabled: true
-    scanIntervalMs: 600000              # 10 minutes between scans
-    marketsPerScan: 50                  # scan top N liquid markets per cycle
-    minMarketVolume24hUsd: 10000        # skip markets below this 24h volume
-    minMarketLiquidityUsd: 10000        # skip illiquid markets
-    tradesPerMarket: 500                # max trades per page per market
-    tradePageDepth: 5                   # fetch up to 5 pages (2500 trades) per market
+    scanIntervalMs: 600000 # 10 minutes between scans
+    marketsPerScan: 50 # scan top N liquid markets per cycle
+    minMarketVolume24hUsd: 10000 # skip markets below this 24h volume
+    minMarketLiquidityUsd: 10000 # skip illiquid markets
+    tradesPerMarket: 500 # max trades per page per market
+    tradePageDepth: 5 # fetch up to 5 pages (2500 trades) per market
     # Whale qualification thresholds
     minAddressTrades: 5
     minAddressVolumeUsd: 5000
     minWinRate: 0.52
-    minRoi: -0.10
+    minRoi: -0.1
     # Auto-tracking
     autoPromoteEnabled: true
     autoPromoteMinScore: 60
     autoPromoteMaxPerScan: 10
     # Big-trade spike detection
-    bigTradeMinUsd: 3000                # flag individual trades ≥ $3K (lowered)
+    bigTradeMinUsd: 3000 # flag individual trades ≥ $3K (lowered)
     # Cross-referencing: deep-scan top whales across all markets
     crossRefEnabled: true
     crossRefMaxPerBatch: 15
     # Whale cluster detection
     clusterDetectionEnabled: true
-    clusterMinWhales: 2                 # lowered from 3 for earlier detection
-    clusterWindowHours: 48              # widened from 24
+    clusterMinWhales: 2 # lowered from 3 for earlier detection
+    clusterWindowHours: 48 # widened from 24
     # Parallel fetching (concurrent market scans — higher = faster but more API load)
-    parallelFetchBatch: 16              # ← doubled from 8 for faster scanning
+    parallelFetchBatch: 16 # ← doubled from 8 for faster scanning
 
     # ── Multi-API Pool (rate limit bypass) ──
     apiPool:
       enabled: true
-      selectionStrategy: least-loaded   # round-robin | least-loaded | weighted-random
+      selectionStrategy: least-loaded # round-robin | least-loaded | weighted-random
       healthCheckIntervalMs: 120000
       endpoints:
         # Add custom endpoints here to multiply throughput:
@@ -321,15 +321,15 @@ whale_tracking:
         #   maxRequestsPerMinute: 60
         #   weight: 8
 
-    # ── Fast-Scan Mode (near-real-time whale detection) ──
+        # ── Fast-Scan Mode (near-real-time whale detection) ──
     fastScan:
       enabled: true
-      intervalMs: 60000                 # 60-second quick rescan
-      topMarkets: 5                     # top 5 hottest markets
-      alertMinUsd: 5000                 # alert on trades ≥ $5K
+      intervalMs: 60000 # 60-second quick rescan
+      topMarkets: 5 # top 5 hottest markets
+      alertMinUsd: 5000 # alert on trades ≥ $5K
 
     # ── Historical Backfill ──
-    backfillDays: 7                     # scan past 7 days on first run
+    backfillDays: 7 # scan past 7 days on first run
 
     # ── On-chain Wallet Balance Lookup ──
     polygonRpcUrl: https://polygon-rpc.com
@@ -340,8 +340,8 @@ whale_tracking:
 
     # ── Copy-Trade Simulator ──
     copySimEnabled: true
-    copySimSlippageBps: 30              # assumed 30 bps slippage
-    copySimDelaySeconds: 10             # assumed 10s copy delay
+    copySimSlippageBps: 30 # assumed 30 bps slippage
+    copySimDelaySeconds: 10 # assumed 10s copy delay
 
     # ── Regime-Adaptive Scoring ──
     regimeAdaptiveEnabled: true
