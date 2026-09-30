@@ -19,7 +19,7 @@
     "@polymarket/clob-client": "^5.8.1",
     "better-sqlite3": "^12.6.2",
     "commander": "^12.1.0",
-    "ethers": "^6.17.0",
+    "ethers": "^5.7.2",
     "pino": "^9.3.2",
     "pino-pretty": "^11.2.0",
     "yaml": "^2.4.5"

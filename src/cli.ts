@@ -21,6 +21,9 @@ import type { WhaleTrackingConfig, ScannerConfig } from './whales/whale_types';
 const program = new Command();
 const statePath = path.resolve('.runtime/state.json');
 
+import { ModelCritic } from './learning/critic';
+import { TradeMemoryBank } from './learning/memory_bank';
+
 /* ── Config normalization helpers ── */
 
 /** Convert a snake_case string to camelCase */
@@ -188,6 +191,12 @@ program
     }
     const dashboardPort = Number(process.env.DASHBOARD_PORT ?? 3000);
     const dashboardServer = new DashboardServer(walletManager, dashboardPort);
+
+    /* ── Deerflow Incubation Critic ── */
+    const memoryBank = new TradeMemoryBank();
+    const critic = new ModelCritic(memoryBank);
+    critic.start();
+    logger.info('Deerflow Model Critic active (30min grading loop)');
 
     /* ── Whale Tracking Engine ── */
     const rawConfig = YAML.parse(fs.readFileSync(options.config, 'utf8')) as Record<string, unknown>;

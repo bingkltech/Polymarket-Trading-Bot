@@ -36,11 +36,12 @@ export class PolymarketWallet {
     this.initClient();
   }
 
-  private initClient() {
+  private async initClient() {
     const apiKey = process.env.POLYMARKET_API_KEY;
     const secret = process.env.POLYMARKET_SECRET;
     const passphrase = process.env.POLYMARKET_PASSPHRASE;
     const pk = process.env.POLYGON_PRIVATE_KEY;
+    const proxyAddress = process.env.POLYMARKET_PROXY_ADDRESS;
 
     if (!apiKey || !secret || !passphrase || !pk) {
       logger.warn('Live API keys or Private Key missing. ClobClient will not initialize.');
@@ -48,17 +49,37 @@ export class PolymarketWallet {
     }
 
     try {
-      const provider = new ethers.JsonRpcProvider('https://polygon-rpc.com');
+      // Use ethers v5 StaticJsonRpcProvider to bypass getNetwork checks
+      const provider = new ethers.providers.StaticJsonRpcProvider('https://polygon-rpc.com', 137);
       const wallet = new ethers.Wallet(pk, provider);
       const creds = { key: apiKey, secret, passphrase };
 
       this.clobClient = new ClobClient(
         'https://clob.polymarket.com',
         137,
-        wallet,
-        creds
+        wallet as any,
+        creds,
+        2, // SignatureType.POLYMARKET_PROXY
+        proxyAddress
       );
       logger.info('Live Polymarket ClobClient initialized successfully.');
+
+      if (proxyAddress) {
+        try {
+          // Fetch actual live USDC.e balance on Polygon
+          const usdcAddress = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+          const abi = ['function balanceOf(address owner) view returns (uint256)'];
+          const contract = new ethers.Contract(usdcAddress, abi, provider);
+          const bal = await contract.balanceOf(proxyAddress);
+          const usdcBalance = parseFloat(ethers.utils.formatUnits(bal, 6));
+          
+          this.state.capitalAllocated = usdcBalance;
+          this.state.availableBalance = usdcBalance;
+          logger.info(`Actual Live USDC Balance updated: $${usdcBalance}`);
+        } catch (balErr) {
+          logger.warn({ balErr }, 'Failed to fetch live USDC balance, defaulting to 0');
+        }
+      }
     } catch (err) {
       logger.error({ err }, 'Failed to initialize ClobClient');
     }
@@ -112,7 +133,7 @@ export class PolymarketWallet {
       const order = await this.clobClient.createOrder({
         tokenID: tokenId,
         price: request.price,
-        side: request.side,
+        side: request.side as any,
         size: request.size,
         feeRateBps: 0 // Polymarket dynamic fee takes care of this on match
       });

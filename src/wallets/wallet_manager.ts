@@ -33,6 +33,11 @@ export class WalletManager {
   setPaperDependencies(stream: OrderbookStream, clobFetcher: ClobFetcher): void {
     this.stream = stream;
     this.clobFetcher = clobFetcher;
+    for (const wallet of this.wallets.values()) {
+      if ('setDependencies' in wallet) {
+        (wallet as any).setDependencies(stream, clobFetcher);
+      }
+    }
     logger.info('WalletManager configured with live data dependencies for paper trading VWAP');
   }
 

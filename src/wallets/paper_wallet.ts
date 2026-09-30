@@ -40,6 +40,12 @@ export class PaperWallet {
     };
   }
 
+  setDependencies(stream: OrderbookStream, clobFetcher: ClobFetcher): void {
+    // Re-instantiate the FillSimulator with real L2 data
+    (this as any).fillSimulator = new FillSimulator(stream, clobFetcher);
+    logger.info({ walletId: this.state.walletId }, 'PaperWallet dependencies injected — VWAP enabled');
+  }
+
   getState(): WalletState {
     return { ...this.state, openPositions: [...this.state.openPositions] };
   }
@@ -87,6 +93,16 @@ export class PaperWallet {
     // entryPrice = 0 so the full proceeds count as realized profit.
     const entryPrice = existingPos ? existingPos.avgPrice : 0;
 
+    // Deduct gas fees for EVERY order, even rejected ones
+    if ('gasFee' in fill && typeof fill.gasFee === 'number') {
+      this.state.availableBalance -= fill.gasFee;
+      this.state.realizedPnl -= fill.gasFee; // Treat gas as realized loss
+    }
+
+    if ((fill as any).rejected) {
+      return; // Stop processing, no actual size was traded
+    }
+
     const position = this.applyFill(fill);
     const pnl = this.pnlTracker.recordFill(fill, position, entryPrice);
     this.state.realizedPnl += pnl.realized;
@@ -96,6 +112,7 @@ export class PaperWallet {
     // Deduct exact USDC execution fees
     if (fill.feeAsset === 'USDC' && fill.fee > 0) {
       this.state.availableBalance -= fill.fee;
+      this.state.realizedPnl -= fill.fee; // Deduct from realized PnL too
     }
 
     this.trades.push({

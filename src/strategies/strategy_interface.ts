@@ -1,4 +1,6 @@
 import { MarketData, OrderRequest, Signal, WalletState } from '../types';
+import { ModelCritic } from '../learning/critic';
+import { logger } from '../reporting/logs';
 
 export interface StrategyContext {
   wallet: WalletState;
@@ -53,7 +55,7 @@ export abstract class BaseStrategy implements StrategyInterface {
 
   abstract generateSignals(): Signal[];
 
-  /** Filter signals through cooldown, then size them */
+  /** Filter signals through cooldown, then size them with Incubation Override */
   sizePositions(signals: Signal[]): OrderRequest[] {
     const now = Date.now();
     const walletId = this.context?.wallet.walletId ?? 'unknown';
@@ -64,6 +66,26 @@ export abstract class BaseStrategy implements StrategyInterface {
       const lastTrade = this.tradeCooldowns.get(key) ?? 0;
       return now - lastTrade > this.cooldownMs;
     });
+
+    // ── DEERFLOW INCUBATION OVERRIDE ──────────────────────────
+    // Mirrors KalshiMarketMaker/core/avellaneda.py get_effective_max_position()
+    const weights = ModelCritic.readWeights();
+    const strategyWeight = weights[this.name] ?? 1.0;
+
+    let incubationMode = false;
+    if (strategyWeight <= 0.1) {
+      incubationMode = true;
+      logger.warn(
+        { strategy: this.name, weight: strategyWeight },
+        '[INCUBATION] Strategy is in the Penalty Box. Forcing micro-lot (1 share).',
+      );
+    } else if (strategyWeight >= 2.0) {
+      logger.info(
+        { strategy: this.name, weight: strategyWeight },
+        '[GRADUATED] Strategy is a star performer. Boosting sizing.',
+      );
+    }
+    // ──────────────────────────────────────────────────────────
 
     return filtered.map((signal) => {
       // Record cooldown
@@ -81,13 +103,26 @@ export abstract class BaseStrategy implements StrategyInterface {
         price = Number((0.5 + signal.edge).toFixed(4));
       }
 
+      // Normal sizing
+      let size = Math.max(1, Math.floor(10 * signal.confidence));
+
+      // ── INCUBATION SIZING OVERRIDE ──
+      if (incubationMode) {
+        size = 1; // Micro-lot: prove yourself with minimum risk
+      } else if (strategyWeight >= 2.0) {
+        size = Math.floor(size * Math.min(strategyWeight, 2.5)); // Boost winners
+      } else if (strategyWeight < 1.0) {
+        size = Math.max(1, Math.floor(size * strategyWeight)); // Proportional reduction
+      }
+      // ────────────────────────────────
+
       return {
         walletId,
         marketId: signal.marketId,
         outcome: signal.outcome,
         side: signal.side,
         price: Number(Math.max(0.01, Math.min(0.99, price)).toFixed(4)),
-        size: Math.max(1, Math.floor(10 * signal.confidence)),
+        size,
         strategy: this.name,
       };
     });
