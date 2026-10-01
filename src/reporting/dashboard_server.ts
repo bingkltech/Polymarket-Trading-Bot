@@ -2403,7 +2403,7 @@ function renderWallets(wl){
     const tPnl = w.totalPnl || w.realizedPnl;
     const isPaused = w.paused || false;
     const toggleCls = isPaused ? 'paused' : 'running';
-    const toggleLabel = isPaused ? '\u25B6 Start' : '\u23F8 Running';
+    const toggleLabel = isPaused ? '\u25B6 Start' : '\u23F8 Stop';
     const dName = w.displayName || w.walletId;
 
     /* ── Top 10 positions by total PnL ── */
@@ -2511,7 +2511,7 @@ function renderWalletDetail(d){
   html+='<div class="wd-status-bar">'+
     '<div class="wd-status-indicator '+stCls+'"></div>'+
     '<div class="wd-status-text">'+stText+'<span class="sub">'+w.strategy+' \u00B7 '+w.mode+' \u00B7 $'+fmt(w.capitalAllocated,0)+' capital</span></div>'+
-    '<button class="toggle-btn '+stCls+'" onclick="toggleWalletFromDetail(\\''+w.walletId+'\\','+isPaused+')"><span class="toggle-dot"></span>'+(isPaused?'\u25B6 Start':'\u23F8 Pause')+'</button>'+
+    '<button class="toggle-btn '+stCls+'" onclick="toggleWalletFromDetail(\\''+w.walletId+'\\','+isPaused+')"><span class="toggle-dot"></span>'+(isPaused?'\u25B6 Start':'\u23F8 Stop')+'</button>'+
     '</div>';
 
   /* ── Tabs ── */
@@ -3001,7 +3001,7 @@ function renderWalletTable(wl){
   $('#wt-body').innerHTML=wl.map(w=>{
     const isPaused = pausedMap[w.walletId] || false;
     const toggleCls = isPaused ? 'paused' : 'running';
-    const toggleLabel = isPaused ? '\u25B6 Start' : '\u23F8 Running';
+    const toggleLabel = isPaused ? '\u25B6 Start' : '\u23F8 Stop';
     return '<tr onclick="openWalletDetail(\\''+w.walletId+'\\')" title="Click for detailed analytics">'+
       '<td><strong>'+w.walletId+'</strong> <span style="font-size:10px;color:var(--accent)">\uD83D\uDD0D</span></td>'+
       '<td><span class="badge badge-'+w.mode+'">'+w.mode+'</span></td>'+
