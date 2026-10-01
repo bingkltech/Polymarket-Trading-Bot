@@ -60,6 +60,27 @@ interface ManagedPosition {
   partialTaken: boolean;
 }
 
+/**
+
+ * ## Detailed Decision Flow Diagram
+ * 
+ * ```mermaid
+ * flowchart TD
+ *     A([Trigger Event / Cron]) --> B[Ingest Firehose (News, X/Twitter, Macro)]
+ *     B --> C[Pass Context to LLM Subagent]
+ *     C --> D[LLM analyzes sentiment & ground truth]
+ *     D --> E{LLM Conviction Score > 85%?}
+ *     E -- No --> Z([Discard Signal])
+ *     E -- Yes --> F[Fetch current Polymarket Odds]
+ *     F --> G{Polymarket Price < LLM Probability?}
+ *     G -- No --> Z
+ *     G -- Yes --> H[Calculate Kelly Criterion Sizing]
+ *     H --> I{Risk Engine: Max Exposure Check}
+ *     I -- No --> Z
+ *     I -- Yes --> J[Execute Directional Order]
+ *     J --> K([Log Prediction to Scrubber])
+ * ```
+ */
 export class AiForecastStrategy extends BaseStrategy {
   readonly name = 'ai_forecast';
   protected override cooldownMs = 150_000; // 2.5 min

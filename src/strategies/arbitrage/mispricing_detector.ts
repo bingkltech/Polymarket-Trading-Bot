@@ -46,6 +46,30 @@ interface MispricingPosition {
   peakBps: number;
 }
 
+/**
+
+ * ## Detailed Decision Flow Diagram
+ * 
+ * ```mermaid
+ * flowchart TD
+ *     A([Start Tick]) --> B[Fetch Gamma Market Orderbook]
+ *     B --> C[Get Best YES Ask]
+ *     B --> D[Get Best NO Ask]
+ *     C --> E[Sum = YES Ask + NO Ask]
+ *     D --> E
+ *     E --> F{Is Sum < (1.00 - Exchange Fees)?}
+ *     F -- No --> Z([Wait for next tick])
+ *     F -- Yes --> G[Calculate Max Extractable Value (MEV)]
+ *     G --> H{Are both sides fully matched in depth?}
+ *     H -- No --> I[Reduce Order Size to bottleneck leg]
+ *     H -- Yes --> J[Construct Dual-Order Payload]
+ *     I --> J
+ *     J --> K{Risk Engine: Legging Moat check}
+ *     K -- No --> Z
+ *     K -- Yes --> L[Execute simultaneous YES and NO buys]
+ *     L --> M([Lock in Risk-Free Profit])
+ * ```
+ */
 export class MispricingArbitrageStrategy extends BaseStrategy {
   readonly name = 'mispricing_arbitrage';
   protected override cooldownMs = 45_000;

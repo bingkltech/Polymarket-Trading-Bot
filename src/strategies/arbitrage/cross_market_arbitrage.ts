@@ -44,6 +44,29 @@ interface ArbPosition {
   peakEdgeBps: number;
 }
 
+/**
+
+ * ## Detailed Decision Flow Diagram
+ * 
+ * ```mermaid
+ * flowchart TD
+ *     A([Start Tick]) --> B{Fetch External Oracle (e.g. Binance)}
+ *     B --> C{Fetch Polymarket Orderbook}
+ *     C --> D[Calculate Implied Price Delta]
+ *     D --> E{Is Delta > Spread Threshold?}
+ *     E -- No --> Z([Wait for next tick])
+ *     E -- Yes --> F{Is Orderbook Depth sufficient?}
+ *     F -- No --> Z
+ *     F -- Yes --> G[Calculate Optimal Sizing / Hedge Ratio]
+ *     G --> H{Risk Engine: Passes Legging Moat?}
+ *     H -- No --> Z
+ *     H -- Yes --> I[Dispatch Atomic Trade]
+ *     I --> J[Buy Asset on External CEX]
+ *     I --> K[Buy YES/NO on Polymarket]
+ *     J --> L([Trade Logged])
+ *     K --> L
+ * ```
+ */
 export class CrossMarketArbitrageStrategy extends BaseStrategy {
   readonly name = 'cross_market_arbitrage';
   protected override cooldownMs = 60_000; // 1-min cooldown per market (arbs are time-sensitive)

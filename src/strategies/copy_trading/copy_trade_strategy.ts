@@ -187,6 +187,25 @@ interface WhalePerformance {
 
 /* ━━━━━━━━━━━━━━ Strategy Implementation ━━━━━━━━━━━━━━ */
 
+/**
+
+ * ## Detailed Decision Flow Diagram
+ * 
+ * ```mermaid
+ * flowchart TD
+ *     A([Blockchain Mempool Event]) --> B{Did Tracked Whale Wallet interact with CTF Exchange?}
+ *     B -- No --> Z([Ignore])
+ *     B -- Yes --> C[Parse Transaction Data (Market, Outcome, Size)]
+ *     C --> D{Check Whale Profiler Database}
+ *     D --> E{Whale Win Rate > 50% & Not Cooled Down?}
+ *     E -- No --> Y([Skip / Whale in Penalty Box])
+ *     E -- Yes --> F[Calculate Proportional Sizing (e.g. 1% of Whale Size)]
+ *     F --> G{Risk Engine: Anti-Martingale / Max Daily Loss Check}
+ *     G -- No --> Z
+ *     G -- Yes --> H[Execute Mirrored Order instantly]
+ *     H --> I([Track Copied Position for Exit])
+ * ```
+ */
 export class CopyTradeStrategy extends BaseStrategy {
   readonly name = 'copy_trade';
 

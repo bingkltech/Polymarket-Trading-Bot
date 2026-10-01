@@ -85,6 +85,24 @@ interface UserPosition {
   peakBps: number;
 }
 
+/**
+
+ * ## Detailed Decision Flow Diagram
+ * 
+ * ```mermaid
+ * flowchart TD
+ *     A([Start Tick]) --> B[Load custom JSON AST Ruleset]
+ *     B --> C[Extract required market/wallet variables]
+ *     C --> D[Evaluate AST Tree Conditions]
+ *     D --> E{Evaluates to TRUE?}
+ *     E -- No --> Z([Wait])
+ *     E -- Yes --> F[Extract User Defined Sizing / Price rules]
+ *     F --> G{Risk Engine: Global Limit Checks}
+ *     G -- No --> Z
+ *     G -- Yes --> H[Execute User Defined Signal]
+ *     H --> I([Log Execution])
+ * ```
+ */
 export class UserDefinedStrategy extends BaseStrategy {
   readonly name = 'user_defined';
   protected override cooldownMs = 120_000;

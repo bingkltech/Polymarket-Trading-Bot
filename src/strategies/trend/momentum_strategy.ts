@@ -70,6 +70,26 @@ interface MomentumPosition {
   direction: 'BULL' | 'BEAR';
 }
 
+/**
+
+ * ## Detailed Decision Flow Diagram
+ * 
+ * ```mermaid
+ * flowchart TD
+ *     A([Start Tick]) --> B[Read 1m/5m/15m Volume Profiles]
+ *     B --> C[Calculate Order Flow Imbalance]
+ *     C --> D{Is Volume Spike > 300% of Moving Avg?}
+ *     D -- No --> Z([Wait])
+ *     D -- Yes --> E[Calculate Price Delta / Direction]
+ *     E --> F{Is Delta breaching resistance?}
+ *     F -- No --> Z
+ *     F -- Yes --> G[Calculate Aggressive Entry Size]
+ *     G --> H{Risk Engine: Martingale / Overexposure Check}
+ *     H -- No --> Z
+ *     H -- Yes --> I[Dispatch Aggressive Limit Order (Crossing Spread)]
+ *     I --> J([Monitor for trailing stop exit])
+ * ```
+ */
 export class MomentumStrategy extends BaseStrategy {
   readonly name = 'momentum';
 
