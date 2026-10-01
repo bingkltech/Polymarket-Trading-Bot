@@ -47,6 +47,31 @@ export class RiskEngine {
       return { ok: false, reason: 'Max daily loss breached' };
     }
 
+    /* 🔥 Polymarket Specific Guardrails (Inspired by Kalshi Simulator Lessons) 🔥 */
+
+    const orderCostFinal = order.price * order.size;
+    // 1. Dust Limit Quarantine (Polymarket actively rejects CLOB limit orders < $5)
+    if (orderCostFinal < 5.00 && wallet.mode === 'LIVE' && order.side === 'BUY') {
+      return { ok: false, reason: 'Dust Limit Veto: Order size under $5.00 Polymarket threshold' };
+    }
+
+    // 2. Double-Bet / In-Flight Veto (Avoid overlapping resting limit orders)
+    const hasDuplicateOpen = ((wallet as any).openOrders || []).some(
+      (o) => o.marketId === order.marketId && o.outcome === order.outcome && o.side === order.side
+    );
+    if (hasDuplicateOpen) {
+      return { ok: false, reason: 'Double-Bet Quarantine: Resting order already exists for this outcome' };
+    }
+
+    // 3. Fake Confidence / Penalty Box check
+    // (If the wallet's cancel rate over the last 5 minutes is > 95% with > 20 orders, halt execution)
+    const cancelRate = this.getCancelRate(wallet.walletId);
+    const recentOrders = (this.orderTimestamps.get(wallet.walletId) ?? []).filter((t) => Date.now() - t < 300_000);
+    if (cancelRate > 0.95 && recentOrders.length > 20) {
+      return { ok: false, reason: 'Toxic Cancellation Veto: High fake-confidence spam detected. Halting.' };
+    }
+
+
     /* ── Drawdown check ── */
     const drawdownPct = wallet.capitalAllocated > 0
       ? (wallet.capitalAllocated - wallet.availableBalance - this.getTotalUnrealisedValue(wallet)) / wallet.capitalAllocated

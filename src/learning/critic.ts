@@ -179,6 +179,14 @@ export class ModelCritic {
     fs.writeFileSync(WEIGHTS_PATH, JSON.stringify(dynamicWeights, null, 4));
     logger.info('Critic: Saved dynamic_weights.json');
 
+    // Autonomously scrub data into Lessons Learned
+    import('./agent_scrubber').then((scrubModule) => {
+      const scrubber = new scrubModule.AgentScrubber(this.memoryBank);
+      scrubber.scrubAndCondense(grades).catch((err) => {
+        logger.error({ err }, 'AgentScrubber failed to process lessons learned');
+      });
+    });
+
     return grades;
   }
 

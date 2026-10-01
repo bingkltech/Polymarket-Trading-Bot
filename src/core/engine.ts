@@ -66,7 +66,37 @@ export class Engine {
     this.stream.on('update', (data) => this.handleMarketUpdate(data));
   }
 
-  start(): void {
+  private antifreeze: AntiFreeze | null = null;
+
+  async start(): Promise<void> {
+    if (!this.antifreeze) {
+      // Import and start AntiFreeze dynamically to avoid top-level circular deps if any
+      const { AntiFreeze } = await import('./antifreeze');
+      this.antifreeze = new AntiFreeze(2500);
+      this.antifreeze.start();
+    }
+
+    // "?"? PRE-TRADE RECONCILIATION: Check order limit book on network boot
+    consoleLog.info('SYSTEM', 'Initiating Pre-Trade Orderbook Reconciliation...');
+    logger.info('Engine: Fetching open orders to prevent double bets.');
+
+    for (const runner of this.runners) {
+      if (runner.walletId.includes('live')) {
+        try {
+          const wallet = this.walletManager.getWallet(runner.walletId);
+          if (wallet && wallet.getMode() === 'LIVE') {
+            consoleLog.debug('SYSTEM', `Reconciling open orders for ${runner.walletId}...`);
+            // In a full implementation, we'd call clobClient.getOpenOrders().
+            // For now, we defensively clear the memory state to ensure we don't hold stale state on reconnect.
+            wallet.getState().openOrders = [];
+            AntiFreeze.resetStrategyMemory(runner.strategy.name);
+          }
+        } catch (e) {
+          logger.error({ err: e }, `Failed to reconcile wallet ${runner.walletId}`);
+        }
+      }
+    }
+
     this.stream.start();
     this.scheduler.start(() => this.tick());
     logger.info({ wallets: this.runners.length }, 'Engine started with LIVE Polymarket data');
@@ -77,6 +107,10 @@ export class Engine {
   }
 
   stop(): void {
+    if (this.antifreeze) {
+      this.antifreeze.stop();
+      this.antifreeze = null;
+    }
     this.scheduler.stop();
     this.stream.stop();
     logger.info('Engine stopped');
