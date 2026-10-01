@@ -34,28 +34,23 @@ flowchart TD
 
 ---
 
-## 🔍 Micro-Level Logic Diagram
-This detailed diagram shows the internal decision tree the strategy executes on every tick.
+## 🔍 Detailed Decision Flow Diagram
 
 ```mermaid
-stateDiagram-v2
-    [*] --> IngestData
-    IngestData --> Filter: Raw Market Data
-    Filter --> Analysis: Passed Filters
-    Filter --> [*]: Ignored (Noise)
-    
-    Analysis --> RiskCheck: Proposed Trade
-    Analysis --> [*]: No Alpha Found
-
-    RiskCheck --> Execution: Risk Engine Passed
-    RiskCheck --> [*]: Risk VETO (Drawdown/Limit)
-
-    Execution --> AwaitFill: Sent to ClobClient
-    AwaitFill --> Filled: Trade Executed
-    AwaitFill --> Canceled: Timeout / Slipped
-    
-    Filled --> [*]
-    Canceled --> [*]
+flowchart TD
+    A([Start Tick]) --> B[Filter Active Markets]
+    B --> C{Days to Resolution < 7?}
+    C -- No --> Z([Skip Market])
+    C -- Yes --> D{Current Price > $0.95?}
+    D -- No --> Z
+    D -- Yes --> E[Calculate Implied Annualized Yield (APY)]
+    E --> F{Is APY > Target Hurdle Rate (e.g. 15%)?}
+    F -- No --> Z
+    F -- Yes --> G[Calculate Heavy Capital Allocation]
+    G --> H{Risk Engine: Portfolio Drawdown Check}
+    H -- No --> Z
+    H -- Yes --> I[Place Limit Order at $0.96 / $0.97]
+    I --> J([Hold to Resolution])
 ```
 
 ---

@@ -34,28 +34,25 @@ flowchart TD
 
 ---
 
-## 🔍 Micro-Level Logic Diagram
-This detailed diagram shows the internal decision tree the strategy executes on every tick.
+## 🔍 Detailed Decision Flow Diagram
 
 ```mermaid
-stateDiagram-v2
-    [*] --> IngestData
-    IngestData --> Filter: Raw Market Data
-    Filter --> Analysis: Passed Filters
-    Filter --> [*]: Ignored (Noise)
-    
-    Analysis --> RiskCheck: Proposed Trade
-    Analysis --> [*]: No Alpha Found
-
-    RiskCheck --> Execution: Risk Engine Passed
-    RiskCheck --> [*]: Risk VETO (Drawdown/Limit)
-
-    Execution --> AwaitFill: Sent to ClobClient
-    AwaitFill --> Filled: Trade Executed
-    AwaitFill --> Canceled: Timeout / Slipped
-    
-    Filled --> [*]
-    Canceled --> [*]
+flowchart TD
+    A([Start Tick]) --> B[Fetch Market Mid-Price]
+    B --> C[Fetch Current Wallet Inventory (YES/NO Exposure)]
+    C --> D[Calculate Inventory Skew]
+    D --> E{Is Inventory heavily skewed?}
+    E -- Yes --> F[Shift Asks down to incentivize selling]
+    E -- No --> G[Keep Bids/Asks symmetrical around mid]
+    F --> H[Calculate New Ladder (Levels & Spreads)]
+    G --> H
+    H --> I{Are existing active orders > 2% away from new target?}
+    I -- No --> Z([Do Nothing, wait])
+    I -- Yes --> J[Cancel Old Orders]
+    J --> K{Risk Engine: MM Spam Check (Max 500/min)?}
+    K -- No --> Y([Throttle / Pause])
+    K -- Yes --> L[Dispatch New Maker Limit Orders]
+    L --> M([Update Resting Book])
 ```
 
 ---

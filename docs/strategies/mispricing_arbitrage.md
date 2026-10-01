@@ -34,28 +34,26 @@ flowchart TD
 
 ---
 
-## 🔍 Micro-Level Logic Diagram
-This detailed diagram shows the internal decision tree the strategy executes on every tick.
+## 🔍 Detailed Decision Flow Diagram
 
 ```mermaid
-stateDiagram-v2
-    [*] --> IngestData
-    IngestData --> Filter: Raw Market Data
-    Filter --> Analysis: Passed Filters
-    Filter --> [*]: Ignored (Noise)
-    
-    Analysis --> RiskCheck: Proposed Trade
-    Analysis --> [*]: No Alpha Found
-
-    RiskCheck --> Execution: Risk Engine Passed
-    RiskCheck --> [*]: Risk VETO (Drawdown/Limit)
-
-    Execution --> AwaitFill: Sent to ClobClient
-    AwaitFill --> Filled: Trade Executed
-    AwaitFill --> Canceled: Timeout / Slipped
-    
-    Filled --> [*]
-    Canceled --> [*]
+flowchart TD
+    A([Start Tick]) --> B[Fetch Gamma Market Orderbook]
+    B --> C[Get Best YES Ask]
+    B --> D[Get Best NO Ask]
+    C --> E[Sum = YES Ask + NO Ask]
+    D --> E
+    E --> F{Is Sum < (1.00 - Exchange Fees)?}
+    F -- No --> Z([Wait for next tick])
+    F -- Yes --> G[Calculate Max Extractable Value (MEV)]
+    G --> H{Are both sides fully matched in depth?}
+    H -- No --> I[Reduce Order Size to bottleneck leg]
+    H -- Yes --> J[Construct Dual-Order Payload]
+    I --> J
+    J --> K{Risk Engine: Legging Moat check}
+    K -- No --> Z
+    K -- Yes --> L[Execute simultaneous YES and NO buys]
+    L --> M([Lock in Risk-Free Profit])
 ```
 
 ---

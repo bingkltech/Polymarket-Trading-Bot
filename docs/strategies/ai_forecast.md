@@ -34,28 +34,23 @@ flowchart TD
 
 ---
 
-## 🔍 Micro-Level Logic Diagram
-This detailed diagram shows the internal decision tree the strategy executes on every tick.
+## 🔍 Detailed Decision Flow Diagram
 
 ```mermaid
-stateDiagram-v2
-    [*] --> IngestData
-    IngestData --> Filter: Raw Market Data
-    Filter --> Analysis: Passed Filters
-    Filter --> [*]: Ignored (Noise)
-    
-    Analysis --> RiskCheck: Proposed Trade
-    Analysis --> [*]: No Alpha Found
-
-    RiskCheck --> Execution: Risk Engine Passed
-    RiskCheck --> [*]: Risk VETO (Drawdown/Limit)
-
-    Execution --> AwaitFill: Sent to ClobClient
-    AwaitFill --> Filled: Trade Executed
-    AwaitFill --> Canceled: Timeout / Slipped
-    
-    Filled --> [*]
-    Canceled --> [*]
+flowchart TD
+    A([Trigger Event / Cron]) --> B[Ingest Firehose (News, X/Twitter, Macro)]
+    B --> C[Pass Context to LLM Subagent]
+    C --> D[LLM analyzes sentiment & ground truth]
+    D --> E{LLM Conviction Score > 85%?}
+    E -- No --> Z([Discard Signal])
+    E -- Yes --> F[Fetch current Polymarket Odds]
+    F --> G{Polymarket Price < LLM Probability?}
+    G -- No --> Z
+    G -- Yes --> H[Calculate Kelly Criterion Sizing]
+    H --> I{Risk Engine: Max Exposure Check}
+    I -- No --> Z
+    I -- Yes --> J[Execute Directional Order]
+    J --> K([Log Prediction to Scrubber])
 ```
 
 ---

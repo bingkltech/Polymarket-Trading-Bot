@@ -34,28 +34,21 @@ flowchart TD
 
 ---
 
-## 🔍 Micro-Level Logic Diagram
-This detailed diagram shows the internal decision tree the strategy executes on every tick.
+## 🔍 Detailed Decision Flow Diagram
 
 ```mermaid
-stateDiagram-v2
-    [*] --> IngestData
-    IngestData --> Filter: Raw Market Data
-    Filter --> Analysis: Passed Filters
-    Filter --> [*]: Ignored (Noise)
-    
-    Analysis --> RiskCheck: Proposed Trade
-    Analysis --> [*]: No Alpha Found
-
-    RiskCheck --> Execution: Risk Engine Passed
-    RiskCheck --> [*]: Risk VETO (Drawdown/Limit)
-
-    Execution --> AwaitFill: Sent to ClobClient
-    AwaitFill --> Filled: Trade Executed
-    AwaitFill --> Canceled: Timeout / Slipped
-    
-    Filled --> [*]
-    Canceled --> [*]
+flowchart TD
+    A([Blockchain Mempool Event]) --> B{Did Tracked Whale Wallet interact with CTF Exchange?}
+    B -- No --> Z([Ignore])
+    B -- Yes --> C[Parse Transaction Data (Market, Outcome, Size)]
+    C --> D{Check Whale Profiler Database}
+    D --> E{Whale Win Rate > 50% & Not Cooled Down?}
+    E -- No --> Y([Skip / Whale in Penalty Box])
+    E -- Yes --> F[Calculate Proportional Sizing (e.g. 1% of Whale Size)]
+    F --> G{Risk Engine: Anti-Martingale / Max Daily Loss Check}
+    G -- No --> Z
+    G -- Yes --> H[Execute Mirrored Order instantly]
+    H --> I([Track Copied Position for Exit])
 ```
 
 ---
