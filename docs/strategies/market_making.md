@@ -55,6 +55,16 @@ flowchart TD
     L --> M([Update Resting Book])
 ```
 
+
+### 📝 Step-by-Step Breakdown
+1. **Fetch State:** The bot fetches the current market mid-price and its own wallet inventory (how many YES vs NO tokens it currently holds).
+2. **Calculate Inventory Skew:** If the bot is heavily exposed to one side (e.g., holding too much YES), it dynamically shifts its Asks lower to incentivize buyers to take it, while dropping Bids to prevent accumulating more.
+3. **Build Ladder:** If inventory is flat, it builds symmetrical Bid/Ask ladders around the mid-price to farm the spread.
+4. **Resting Order Check:** It compares this newly calculated theoretical ladder against its *already resting* active limit orders.
+5. **Cancel & Replace:** If resting orders have drifted too far from the spot price, they are canceled.
+6. **Risk Firewall:** The new ladder is sent to the Risk Engine to ensure the bot hasn't tripped the high-frequency MM Spam Veto before dispatching.
+
+
 ---
 
 ## 📥 Inputs and 📤 Outputs

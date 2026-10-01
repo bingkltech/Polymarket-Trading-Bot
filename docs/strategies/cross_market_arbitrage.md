@@ -55,6 +55,16 @@ flowchart TD
     K --> L
 ```
 
+
+### 📝 Step-by-Step Breakdown
+1. **Fetch External Oracles:** The bot pulls real-time pricing data from external centralized exchanges (e.g., Binance).
+2. **Fetch Polymarket Orderbook:** It pulls the current Bid/Ask limit levels from the Polymarket CLOB.
+3. **Calculate Delta:** The engine compares the two prices to find the implied delta. If the spread is too small to cover fees, it waits.
+4. **Liquidity Check:** If a profitable delta exists, it checks if the Polymarket orderbook actually has enough depth to absorb the trade without slipping.
+5. **Hedge Ratios:** It calculates the mathematically optimal sizing to remain market-neutral.
+6. **Risk Firewall:** The trade is sent to the Risk Engine to verify the Legging Moat veto. If cleared, atomic dual-leg orders are fired simultaneously.
+
+
 ---
 
 ## 📥 Inputs and 📤 Outputs

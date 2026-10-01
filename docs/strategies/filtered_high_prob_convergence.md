@@ -53,6 +53,16 @@ flowchart TD
     I --> J([Hold to Resolution])
 ```
 
+
+### 📝 Step-by-Step Breakdown
+1. **Time Filtering:** The engine scans the market registry for active events that resolve in less than 7 days.
+2. **Probability Filtering:** It filters out any outcome currently trading below 95 cents (hunting for >95% implied probability "sure things").
+3. **Yield Calculation:** It calculates the Annualized Percentage Yield (APY) of locking capital into this asset until resolution.
+4. **Hurdle Rate Check:** If the APY clears the target hurdle rate (e.g., 15%), it triggers a massive capital allocation.
+5. **Risk Firewall:** The Risk Engine verifies global portfolio drawdown limits.
+6. **Yield Harvesting:** If approved, it places heavy limit orders at $0.96 or $0.97 to harvest yield until the market resolves.
+
+
 ---
 
 ## 📥 Inputs and 📤 Outputs

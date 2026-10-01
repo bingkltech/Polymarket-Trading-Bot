@@ -50,6 +50,16 @@ flowchart TD
     H --> I([Log Execution])
 ```
 
+
+### 📝 Step-by-Step Breakdown
+1. **Load Ruleset:** The bot loads your custom JSON AST (Abstract Syntax Tree) configuration.
+2. **Extract Variables:** It dynamically fetches whatever live variables you requested in your config (e.g., specific prices, wallet balances, or time constraints).
+3. **Evaluate:** It mathematically evaluates your custom AST conditions against the live data.
+4. **Signal Generation:** If the conditions evaluate to `TRUE`, it extracts your defined sizing and pricing rules.
+5. **Risk Firewall:** The custom signal is passed through the standard Global Risk Engine limits (Daily Loss, Drawdown limits) to prevent human-error blowups.
+6. **Execution:** If mathematically safe, your custom trade executes.
+
+
 ---
 
 ## 📥 Inputs and 📤 Outputs

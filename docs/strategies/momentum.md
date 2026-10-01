@@ -52,6 +52,16 @@ flowchart TD
     I --> J([Monitor for trailing stop exit])
 ```
 
+
+### 📝 Step-by-Step Breakdown
+1. **Volume Profiling:** The bot continuously monitors 1m/5m/15m volume profiles and compares them against historical moving averages.
+2. **Spike Detection:** If an order flow imbalance triggers a massive volume spike (>300% average), it flags momentum.
+3. **Delta Resistance:** It tracks the price delta to see if key psychological resistance levels are being breached.
+4. **Aggressive Sizing:** If a breakout is confirmed, it calculates an aggressive, spread-crossing entry size.
+5. **Risk Firewall:** The Risk Engine strictly enforces Anti-Martingale rules, ensuring the bot isn't "doubling down" on a bad bet during chop.
+6. **Execution:** An aggressive limit order is dispatched to ride the momentum wave.
+
+
 ---
 
 ## 📥 Inputs and 📤 Outputs

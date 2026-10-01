@@ -51,6 +51,16 @@ flowchart TD
     H --> I([Track Copied Position for Exit])
 ```
 
+
+### 📝 Step-by-Step Breakdown
+1. **Mempool Monitoring:** The bot silently monitors the Polygon blockchain RPC mempool for any transactions originating from a tracked "Whale" wallet.
+2. **Transaction Parsing:** If a transaction hits the CTF Exchange, the bot instantly parses the contract bytecode to determine the Market, Outcome, and Trade Size.
+3. **Profiler Verification:** It queries the internal Whale Profiler database to ensure this wallet is still actively profitable (Win rate > 50%) and not in a consecutive-loss cooldown penalty box.
+4. **Proportional Scaling:** It scales the Whale's trade size proportionally to your own bankroll (e.g., mirroring at 1% volume).
+5. **Risk Firewall:** The mirrored trade is sent to the Risk Engine to verify Anti-Martingale and Max Loss guardrails.
+6. **Execution:** If approved, the bot instantly submits the mirrored trade on-chain.
+
+
 ---
 
 ## 📥 Inputs and 📤 Outputs

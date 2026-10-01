@@ -53,6 +53,16 @@ flowchart TD
     J --> K([Log Prediction to Scrubber])
 ```
 
+
+### 📝 Step-by-Step Breakdown
+1. **Data Ingestion:** A chron job triggers the collection of real-time firehose data (News articles, Twitter/X feeds, and Macro trends).
+2. **LLM Contextualization:** This massive text payload is fed into an autonomous LLM Subagent designed to extract sentiment and ground truth.
+3. **Conviction Scoring:** The LLM returns a mathematical confidence score. If it's below 85%, the signal is discarded as noise.
+4. **Edge Calculation:** If confidence is high (>85%), the bot checks the actual Polymarket trading price. Edge only exists if the market price is lower than the LLM's probability.
+5. **Sizing:** The bot calculates Kelly Criterion sizing based on the perceived edge.
+6. **Risk Firewall:** After verifying Max Exposure limits in the Risk Engine, the directional bet is placed.
+
+
 ---
 
 ## 📥 Inputs and 📤 Outputs

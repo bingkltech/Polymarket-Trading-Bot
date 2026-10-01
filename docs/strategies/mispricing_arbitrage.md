@@ -56,6 +56,16 @@ flowchart TD
     L --> M([Lock in Risk-Free Profit])
 ```
 
+
+### 📝 Step-by-Step Breakdown
+1. **Orderbook Scan:** The bot fetches the best available Ask prices for both the YES and NO tokens of a specific market.
+2. **Summation:** It adds the best YES Ask and best NO Ask together.
+3. **Arbitrage Check:** If the sum is strictly less than 1.00 (minus exchange fees), a mathematically risk-free arbitrage opportunity exists (buying both guarantees $1.00 at resolution).
+4. **Calculate MEV:** It determines the Maximum Extractable Value by calculating how much volume is actually available at those combined prices.
+5. **Risk Firewall:** The payload passes through the Risk Engine to ensure the trade size clears the minimum capital requirement (Legging Moat).
+6. **Atomic Execution:** Simultaneous buy orders are submitted to lock in guaranteed profit without directional risk.
+
+
 ---
 
 ## 📥 Inputs and 📤 Outputs
