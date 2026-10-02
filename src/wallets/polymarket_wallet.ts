@@ -139,12 +139,13 @@ export class PolymarketWallet {
     const roundedPrice = Number((Math.round(request.price * 100) / 100).toFixed(2));
     const safePrice = Math.max(0.01, Math.min(0.99, roundedPrice));
     
-    // Enforce Polymarket minimum order notional of $1.00
+    // Enforce strictly 1 to 2 shares max per trade, respecting Polymarket minimum order notional of $1.00
     let size = Math.max(1, Math.floor(request.size));
     if (request.side === 'BUY') {
       const minSharesForDollar = Math.ceil(1.00 / safePrice);
-      if (size < minSharesForDollar) {
-        size = minSharesForDollar;
+      size = Math.min(2, Math.max(minSharesForDollar, size));
+      if (size * safePrice < 1.00) {
+        size = Math.min(2, Math.ceil(1.00 / safePrice));
       }
       // Ensure we don't exceed available cash
       const maxAffordable = Math.floor(this.state.availableBalance / safePrice);
@@ -152,7 +153,7 @@ export class PolymarketWallet {
         size = maxAffordable;
       }
       if (size * safePrice < 1.00) {
-        logger.warn({ availableBalance: this.state.availableBalance, cost: size * safePrice }, 'Insufficient balance to meet Polymarket $1.00 min order');
+        logger.warn({ availableBalance: this.state.availableBalance, cost: size * safePrice, size }, 'Order cannot meet Polymarket $1.00 min notional within 1-2 shares limit. Skipping.');
         return;
       }
     } else {

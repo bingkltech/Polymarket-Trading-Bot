@@ -270,21 +270,16 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       const maxMle = capital * (this.cfg.max_market_mle_pct ?? 0.25);
       positionUsd = Math.min(positionUsd, maxMle);
 
-      /* Convert USD to integer shares */
+      /* Convert USD to integer shares — strictly 1 to 2 shares max per trade */
       const minShares = Math.ceil(1.00 / entryPrice);
-      let shares = Math.floor(positionUsd / entryPrice);
-      if (shares < 1) {
-        if (1.00 <= maxPosLimit && 1.00 <= maxMle + 1.0) {
-          shares = minShares;
-        } else {
-          continue;
-        }
+      let shares = Math.min(2, Math.max(1, minShares));
+      if (shares * entryPrice < 1.00) {
+        shares = Math.min(2, Math.ceil(1.00 / entryPrice));
       }
-
-      if (shares * entryPrice > maxPosLimit || shares * entryPrice > maxMle + 0.01) {
-        shares = Math.floor(Math.min(maxPosLimit, maxMle) / entryPrice);
+      if (shares * entryPrice < 1.00 || shares > 2) {
+        // Cannot satisfy $1.00 min notional within 2 shares limit -> skip
+        continue;
       }
-      if (shares < 1) continue;
 
       /* Cluster exposure check */
       if (!this.checkClusterExposure(market, shares * entryPrice)) continue;

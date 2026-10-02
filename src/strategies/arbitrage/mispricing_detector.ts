@@ -174,11 +174,14 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
         const safePrice = Number((Math.round(price * 100) / 100).toFixed(2));
         const boundedPrice = Math.max(0.01, Math.min(0.99, safePrice));
 
-        // Enforce $1.00 min notional and max position size limit ($5)
+        // Enforce strictly 1 to 2 shares max per trade, satisfying $1.00 min notional
         const minShares = Math.ceil(1.00 / boundedPrice);
-        let size = Math.max(minShares, Math.min(5, Math.floor(maxSizeLimit / boundedPrice)));
-        if (size * boundedPrice > maxSizeLimit) {
-          size = Math.max(minShares, Math.floor(maxSizeLimit / boundedPrice));
+        let size = Math.min(2, Math.max(1, minShares));
+        if (size * boundedPrice < 1.00) {
+          size = Math.min(2, Math.ceil(1.00 / boundedPrice));
+        }
+        if (size * boundedPrice < 1.00 || size > 2) {
+          return null as any;
         }
 
         return {
@@ -190,7 +193,8 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
           size,
           strategy: this.name,
         };
-      });
+      })
+      .filter((o): o is OrderRequest => Boolean(o));
   }
 
   /* ── Position tracking via engine callback ──────────────────── */
