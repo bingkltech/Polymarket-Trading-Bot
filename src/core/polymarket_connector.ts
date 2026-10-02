@@ -1,4 +1,4 @@
-import { ClobClient, SignatureType, AssetType } from '@polymarket/clob-client';
+import { ClobClient, SignatureTypeV2, AssetType } from '@polymarket/clob-client-v2';
 import { ethers } from 'ethers';
 import { logger } from '../reporting/logs';
 
@@ -37,8 +37,6 @@ export class PolymarketConnector {
         return urls;
     }
 
-    private readonly usdcE_Address = '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'; // Polymarket uses Native USDC
-
     /**
      * Initializes the connection with full integrity checks.
      */
@@ -67,7 +65,10 @@ export class PolymarketConnector {
         if (!canTrade) {
             logger.info('Running in READ-ONLY mode. Missing LIVE credentials in .env.');
             // Initialize unauthenticated client for data fetching only
-            this.clobClient = new ClobClient('https://clob.polymarket.com', 137);
+            this.clobClient = new ClobClient({
+                host: 'https://clob.polymarket.com',
+                chain: 137
+            });
             return status;
         }
 
@@ -90,13 +91,19 @@ export class PolymarketConnector {
             status.rpcStatus = 'FAILED';
             status.errors.push('All Polygon RPC connections failed. Ensure network outbound is permitted or provide a premium API key.');
             logger.error('Falling back to READ-ONLY mode due to RPC failure.');
-            this.clobClient = new ClobClient('https://clob.polymarket.com', 137);
+            this.clobClient = new ClobClient({
+                host: 'https://clob.polymarket.com',
+                chain: 137
+            });
             return status;
         }
 
-        // 3. Authenticate with ClobClient
+        // 3. Authenticate with ClobClient V2
         try {
             const wallet = new ethers.Wallet(pk!, this.provider!);
+            const isEOA = wallet.address.toLowerCase() === proxyAddress!.toLowerCase();
+            const signatureType = isEOA ? SignatureTypeV2.EOA : SignatureTypeV2.POLY_1271;
+
             let activeCreds = (apiKey && secret && passphrase) 
                 ? { key: apiKey, secret: secret, passphrase: passphrase } 
                 : undefined;
@@ -105,14 +112,14 @@ export class PolymarketConnector {
             // Test user-provided creds if present
             if (activeCreds) {
                 try {
-                    const testClient = new ClobClient(
-                        'https://clob.polymarket.com',
-                        137,
-                        wallet as any,
-                        activeCreds,
-                        0,
-                        proxyAddress!
-                    );
+                    const testClient = new ClobClient({
+                        host: 'https://clob.polymarket.com',
+                        chain: 137,
+                        signer: wallet as any,
+                        creds: activeCreds,
+                        signatureType,
+                        funderAddress: proxyAddress!
+                    });
                     await testClient.getOpenOrders();
                     this.clobClient = testClient;
                     authed = true;
@@ -123,39 +130,38 @@ export class PolymarketConnector {
 
             if (!authed) {
                 // Dynamically derive or create valid API credentials
-                const initClient = new ClobClient(
-                    'https://clob.polymarket.com',
-                    137,
-                    wallet as any,
-                    undefined,
-                    0,
-                    proxyAddress!
-                );
-                let derivedCreds = await initClient.deriveApiKey();
-                if (!derivedCreds || !derivedCreds.key) {
-                    derivedCreds = await initClient.createApiKey();
-                }
+                const initClient = new ClobClient({
+                    host: 'https://clob.polymarket.com',
+                    chain: 137,
+                    signer: wallet as any,
+                    signatureType,
+                    funderAddress: proxyAddress!
+                });
+                let derivedCreds = await initClient.createOrDeriveApiKey();
 
-                this.clobClient = new ClobClient(
-                    'https://clob.polymarket.com',
-                    137,
-                    wallet as any,
-                    derivedCreds,
-                    0,
-                    proxyAddress!
-                );
+                this.clobClient = new ClobClient({
+                    host: 'https://clob.polymarket.com',
+                    chain: 137,
+                    signer: wallet as any,
+                    creds: derivedCreds,
+                    signatureType,
+                    funderAddress: proxyAddress!
+                });
                 await this.clobClient.getOpenOrders();
                 authed = true;
-                logger.info('Successfully authenticated with dynamically derived Polymarket API credentials.');
+                logger.info('Successfully authenticated with Polymarket CLOB v2 credentials.');
             }
             
             status.clobAuthStatus = 'AUTHENTICATED';
             status.mode = 'LIVE_TRADING';
-            logger.info('Polymarket API credentials verified and live trading client established.');
+            logger.info('Polymarket CLOB v2 client verified and live trading established.');
         } catch (err: any) {
             status.errors.push(`CLOB Auth Failed: ${err.message}`);
             logger.error({ err }, 'Failed to initialize ClobClient for Live Trading.');
-            this.clobClient = new ClobClient('https://clob.polymarket.com', 137);
+            this.clobClient = new ClobClient({
+                host: 'https://clob.polymarket.com',
+                chain: 137
+            });
             status.mode = 'READ_ONLY';
             return status;
         }
@@ -163,32 +169,28 @@ export class PolymarketConnector {
         // 4. Verify Balance (Final Integrity Gate)
         logger.info(`Fetching balances on-chain...`);
         try {
-            const abi = ['function balanceOf(address owner) view returns (uint256)'];
-                
-                // Native USDC
-                const nativeUsdcContract = new ethers.Contract('0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', abi, this.provider!);
-                const nativeBal = await nativeUsdcContract.balanceOf(proxyAddress!);
-                const nativeFormatted = parseFloat(ethers.utils.formatUnits(nativeBal, 6));
-
-                // Bridged USDC.e
-                const bridgedUsdcContract = new ethers.Contract('0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174', abi, this.provider!);
-                const bridgedBal = await bridgedUsdcContract.balanceOf(proxyAddress!);
-                const bridgedFormatted = parseFloat(ethers.utils.formatUnits(bridgedBal, 6));
-
-                // pUSD (Polymarket USD)
+            if (this.clobClient) {
+                const clobBal = await this.clobClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+                if (clobBal && clobBal.balance) {
+                    status.balanceUSDC = parseFloat(clobBal.balance) / 1e6;
+                    logger.info(`Verified Live Polymarket CLOB Balance -> $${status.balanceUSDC.toFixed(2)} pUSD`);
+                }
+            }
+            
+            if (status.balanceUSDC === undefined) {
+                const abi = ['function balanceOf(address owner) view returns (uint256)'];
                 const pusdContract = new ethers.Contract('0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb', abi, this.provider!);
                 const pusdBal = await pusdContract.balanceOf(proxyAddress!);
-                const pusdFormatted = parseFloat(ethers.utils.formatUnits(pusdBal, 6));
-
-                status.balanceUSDC = nativeFormatted + bridgedFormatted + pusdFormatted;
-                logger.info(`Verified Live On-Chain Balances -> Native USDC: $${nativeFormatted} | Bridged USDC.e: $${bridgedFormatted} | pUSD: $${pusdFormatted}`);
+                status.balanceUSDC = parseFloat(ethers.utils.formatUnits(pusdBal, 6));
+                logger.info(`Verified Live On-Chain Balance -> $${status.balanceUSDC.toFixed(2)} pUSD`);
+            }
         } catch (balErr: any) {
-            status.errors.push(`Balance check failed entirely: ${balErr.message}`);
+            status.errors.push(`Balance check failed: ${balErr.message}`);
             logger.warn(`Could not verify on-chain balance: ${balErr.message}`);
         }
         
         if (status.balanceUSDC === 0) {
-            logger.warn('WARNING: Your wallet has 0 USDC available for trading. Trades will fail until funded.');
+            logger.warn('WARNING: Your wallet has 0 USDC/pUSD available for trading. Trades will fail until funded.');
         }
 
         return status;

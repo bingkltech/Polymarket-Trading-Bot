@@ -2,7 +2,7 @@ import { WalletConfig, WalletState, TradeRecord, Position } from '../types';
 import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
 import { OrderbookStream } from '../data/orderbook_stream';
-import { ClobClient } from '@polymarket/clob-client';
+import { ClobClient, SignatureTypeV2 } from '@polymarket/clob-client-v2';
 import { PolymarketConnector, ConnectionIntegrityStatus } from '../core/polymarket_connector';
 import { TradeMemoryBank } from '../learning/memory_bank';
 
@@ -138,7 +138,37 @@ export class PolymarketWallet {
     // Align price to 2 decimal places to satisfy Polymarket tick size rules
     const roundedPrice = Number((Math.round(request.price * 100) / 100).toFixed(2));
     const safePrice = Math.max(0.01, Math.min(0.99, roundedPrice));
-    const size = Math.max(1, Math.floor(request.size));
+    
+    // Enforce Polymarket minimum order notional of $1.00
+    let size = Math.max(1, Math.floor(request.size));
+    if (request.side === 'BUY') {
+      const minSharesForDollar = Math.ceil(1.00 / safePrice);
+      if (size < minSharesForDollar) {
+        size = minSharesForDollar;
+      }
+      // Ensure we don't exceed available cash
+      const maxAffordable = Math.floor(this.state.availableBalance / safePrice);
+      if (size > maxAffordable) {
+        size = maxAffordable;
+      }
+      if (size * safePrice < 1.00) {
+        logger.warn({ availableBalance: this.state.availableBalance, cost: size * safePrice }, 'Insufficient balance to meet Polymarket $1.00 min order');
+        return;
+      }
+    } else {
+      // SELL: Don't sell more than we hold
+      const existingPos = this.state.openPositions.find(
+        (p) => p.marketId === request.marketId && p.outcome === request.outcome
+      );
+      if (existingPos) {
+        size = Math.min(size, existingPos.size);
+      }
+    }
+
+    if (size <= 0) {
+      logger.warn({ request }, 'Order size calculated as 0. Aborting order.');
+      return;
+    }
 
     logger.info(
       { walletId: this.state.walletId, marketId: request.marketId, tokenId, price: safePrice, size },
@@ -146,6 +176,33 @@ export class PolymarketWallet {
     );
 
     try {
+      const order = await this.clobClient.createOrder({
+        tokenID: tokenId,
+        price: safePrice,
+        side: request.side as any,
+        size: size
+      });
+
+      const response: any = await this.clobClient.postOrder(order);
+      
+      // Strict rejection check: errorMsg, error string, status code >= 400, or success === false
+      const hasError = !response || 
+        response.success === false || 
+        !!response.error || 
+        (typeof response.errorMsg === 'string' && response.errorMsg.length > 0) ||
+        response.status === 'ERROR' ||
+        (typeof response.status === 'number' && response.status >= 400);
+
+      if (hasError) {
+        const errorMsg = response?.error || response?.errorMsg || JSON.stringify(response);
+        logger.error({ response, errorMsg }, 'LIVE order rejected by Polymarket CLOB');
+        consoleLog.error('ORDER', `Live order rejected: ${errorMsg}`);
+        return; // DO NOT MUTATE LOCAL POSITIONS OR REALIZED PNL ON REJECTION!
+      }
+
+      logger.info({ response }, 'LIVE order posted successfully to Polymarket CLOB!');
+      consoleLog.success('ORDER', `LIVE ${request.side} ${request.outcome} x${size} @ $${safePrice.toFixed(2)} placed! (ID: ${response.orderID || 'ok'})`);
+
       let feeRateBps = 0;
       try {
         if (typeof (this.clobClient as any).getFeeRateBps === 'function') {
@@ -154,25 +211,6 @@ export class PolymarketWallet {
       } catch {
         feeRateBps = 0;
       }
-
-      const order = await this.clobClient.createOrder({
-        tokenID: tokenId,
-        price: safePrice,
-        side: request.side as any,
-        size: size,
-        feeRateBps: feeRateBps ?? 0 
-      });
-
-      const response = await this.clobClient.postOrder(order);
-      
-      if ((response as any)?.errorMsg || (response as any)?.status === 'ERROR') {
-        logger.error({ response }, 'LIVE order rejected by Polymarket CLOB');
-        consoleLog.error('ORDER', `Live order rejected: ${(response as any)?.errorMsg || JSON.stringify(response)}`);
-        return;
-      }
-
-      logger.info({ response }, 'LIVE order posted successfully to Polymarket CLOB!');
-      consoleLog.success('ORDER', `LIVE ${request.side} ${request.outcome} x${size} @ $${safePrice.toFixed(2)} placed!`);
 
       // Exact Fee Calculation
       const feeCost = (feeRateBps > 0) ? Number(((safePrice * size * (feeRateBps / 10000))).toFixed(4)) : 0;
@@ -222,7 +260,7 @@ export class PolymarketWallet {
         }
       }
 
-      const orderId = (response as any)?.orderID || `live_${Date.now()}`;
+      const orderId = response?.orderID || `live_${Date.now()}`;
       this.trades.push({
         orderId,
         walletId: this.state.walletId,
@@ -273,3 +311,4 @@ export class PolymarketWallet {
     }
   }
 }
+
