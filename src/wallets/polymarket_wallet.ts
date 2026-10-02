@@ -174,9 +174,16 @@ export class PolymarketWallet {
       logger.info({ response }, 'LIVE order posted successfully to Polymarket CLOB!');
       consoleLog.success('ORDER', `LIVE ${request.side} ${request.outcome} x${size} @ $${safePrice.toFixed(2)} placed!`);
 
-      // Track open positions and trade state in wallet
-      const cost = safePrice * size * (request.side === 'BUY' ? 1 : -1);
-      this.state.availableBalance -= cost;
+      // Exact Fee Calculation
+      const feeCost = (feeRateBps > 0) ? Number(((safePrice * size * (feeRateBps / 10000))).toFixed(4)) : 0;
+
+      // Track open positions and net cash balances
+      const grossCost = safePrice * size;
+      if (request.side === 'BUY') {
+        this.state.availableBalance -= (grossCost + feeCost);
+      } else {
+        this.state.availableBalance += (grossCost - feeCost);
+      }
 
       const existingIndex = this.state.openPositions.findIndex(
         (p) => p.marketId === request.marketId && p.outcome === request.outcome
@@ -189,21 +196,23 @@ export class PolymarketWallet {
           const totalSize = pos.size + size;
           pos.avgPrice = ((pos.avgPrice * pos.size) + (safePrice * size)) / totalSize;
           pos.size = totalSize;
+          pos.realizedPnl -= feeCost;
         } else {
           this.state.openPositions.push({
             marketId: request.marketId,
             outcome: request.outcome,
             size,
             avgPrice: safePrice,
-            realizedPnl: 0,
-            
+            realizedPnl: -feeCost,
           });
         }
+        this.state.realizedPnl -= feeCost; // Deduct entry fee from realized PnL
       } else {
-        // SELL
+        // SELL / EXIT
         if (existingIndex >= 0) {
           const pos = this.state.openPositions[existingIndex];
-          realizedOnTrade = (safePrice - pos.avgPrice) * Math.min(pos.size, size);
+          const grossPnl = (safePrice - pos.avgPrice) * Math.min(pos.size, size);
+          realizedOnTrade = grossPnl - feeCost; // Net Realized PnL after exit fee
           pos.realizedPnl += realizedOnTrade;
           this.state.realizedPnl += realizedOnTrade;
           pos.size -= size;
@@ -222,8 +231,8 @@ export class PolymarketWallet {
         side: request.side,
         price: safePrice,
         size,
-        cost: Math.abs(cost),
-        fee: 0,
+        cost: grossCost,
+        fee: feeCost,
         feeAsset: 'USDC',
         realizedPnl: realizedOnTrade,
         cumulativePnl: this.state.realizedPnl,

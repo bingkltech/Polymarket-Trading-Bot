@@ -126,6 +126,11 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
         edge *= (1 + volDivergence * 0.2);
       }
 
+      // Net Edge Calculation: deduct estimated exchange fees (100 bps / ~1.0% round-trip)
+      const roundTripFee = 0.01;
+      const netEdge = edge - roundTripFee;
+      if (netEdge <= 0.005) continue; // Require positive net edge after fees
+
       const confidence = Math.min(MAX_CONFIDENCE, score.total * 1.1);
 
       signals.push({
@@ -133,7 +138,7 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
         outcome: direction,
         side,
         confidence,
-        edge: Math.min(edge, 0.10),
+        edge: Math.min(netEdge, 0.10),
       });
     }
 
@@ -217,27 +222,31 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
         ? (market.bid ?? market.outcomePrices[0])
         : (1 - (market.ask ?? (1 - market.outcomePrices[1])));
 
-      const edgeBps = pos.side === 'BUY'
+      const grossEdgeBps = pos.side === 'BUY'
         ? (currentBid - pos.entryPrice) * 10_000
         : (pos.entryPrice - currentBid) * 10_000;
 
-      pos.peakBps = Math.max(pos.peakBps, edgeBps);
+      // Deduct estimated 100 bps (1%) round-trip exchange fees from net profit tracking
+      const roundTripFeeBps = 100;
+      const netEdgeBps = grossEdgeBps - roundTripFeeBps;
+
+      pos.peakBps = Math.max(pos.peakBps, netEdgeBps);
       const holdingMin = (Date.now() - pos.entryTime) / 60_000;
 
       let exitReason: string | undefined;
 
-      // 1. Take profit: +150 bps (+1.5c profit)
-      if (edgeBps >= 150) { 
+      // 1. Take profit: +150 bps net profit (+1.5c net after all fees)
+      if (netEdgeBps >= 150) { 
         exitReason = 'TAKE_PROFIT'; 
       }
 
-      // 2. Trailing stop: locked in 100+ bps, dropped 40 from peak
-      if (!exitReason && pos.peakBps >= 100 && edgeBps < pos.peakBps - 40) {
+      // 2. Trailing stop: locked in 100+ bps net profit, dropped 40 from peak
+      if (!exitReason && pos.peakBps >= 100 && netEdgeBps < pos.peakBps - 40) {
         exitReason = 'TRAILING_STOP';
       }
 
-      // 3. Stop-loss: adverse move of -250 bps after at least 1 min holding (allows spread absorption)
-      if (!exitReason && edgeBps <= -250 && holdingMin >= 1.0) { 
+      // 3. Stop-loss: adverse move of -250 bps after at least 1 min holding
+      if (!exitReason && netEdgeBps <= -250 && holdingMin >= 1.0) { 
         exitReason = 'STOP_LOSS'; 
       }
 
