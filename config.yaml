@@ -2,26 +2,32 @@ environment:
   enable_live_trading: true
 
 wallets:
-  - id: live_mispricing
+  - id: live_high_prob
     mode: LIVE
-    strategy: mispricing_arbitrage
+    strategy: filtered_high_prob_convergence
     capital: 20
     risk_limits:
       max_position_size: 5
-      max_exposure_per_market: 20
-      max_daily_loss: 5
-      max_open_trades: 5
+      max_exposure_per_market: 10
+      max_daily_loss: 4
+      max_open_trades: 3
       max_drawdown: 0.10
 
 strategy_config:
+  filtered_high_prob_convergence:
+    enabled: true
+    min_prob: 0.80
+    max_prob: 0.96
+    min_liquidity_usd: 5000
+    max_spread_bps: 120
+    max_days_to_resolution: 14
+    max_position_usd_per_market: 5
+    max_total_open_positions: 3
   mispricing_arbitrage:
-    min_dislocation: 0.02
+    min_dislocation: 0.03
   ai_forecast:
     refresh_minutes: 30
   market_making:
     spread_bps: 40
   momentum:
     lookback_minutes: 15
-  filtered_high_prob_convergence:
-    enabled: true
-    min_liquidity_usd: 10000

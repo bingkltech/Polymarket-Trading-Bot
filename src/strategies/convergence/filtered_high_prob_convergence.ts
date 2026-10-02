@@ -13,31 +13,31 @@ import { logger } from '../../reporting/logs';
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 const DEFAULTS: ConvergenceConfig = {
   enabled: true,
-  min_liquidity_usd: 10_000,
-  min_prob: 0.69,
-  max_prob: 0.90,
-  max_spread_bps: 100,
+  min_liquidity_usd: 5_000,
+  min_prob: 0.78,
+  max_prob: 0.96,
+  max_spread_bps: 120,
   max_days_to_resolution: 14,
-  spike_pct: 0.08,
+  spike_pct: 0.05,
   spike_lookback_minutes: 60,
-  min_depth_usd_within_1pct: 2_000,
-  min_imbalance: 0.10,
+  min_depth_usd_within_1pct: 1_000,
+  min_imbalance: 0.12,
   flow_lookback_minutes: 15,
-  min_net_buy_flow_usd: 500,
-  max_correlated_exposure_pct: 0.25,
-  base_risk_pct: 0.005,
-  max_position_usd_per_market: 200,
-  max_total_open_positions: 10,
+  min_net_buy_flow_usd: 200,
+  max_correlated_exposure_pct: 0.30,
+  base_risk_pct: 0.20,
+  max_position_usd_per_market: 5,
+  max_total_open_positions: 3,
   ttl_seconds: 120,
   allow_take_on_momentum: false,
-  take_profit_bps: 200,
-  stop_loss_bps: 150,
+  take_profit_bps: 150,
+  stop_loss_bps: 250,
   time_exit_hours: 48,
-  max_daily_loss_pct: 0.03,
-  max_weekly_drawdown_pct: 0.08,
-  max_market_mle_pct: 0.05,
-  max_total_mle_pct: 0.15,
-  max_orders_per_minute: 10,
+  max_daily_loss_pct: 0.05,
+  max_weekly_drawdown_pct: 0.10,
+  max_market_mle_pct: 0.25,
+  max_total_mle_pct: 0.50,
+  max_orders_per_minute: 5,
   max_cancel_rate: 0.5,
 };
 
@@ -233,6 +233,8 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
     const capital = this.context?.wallet.capitalAllocated ?? 0;
     if (capital <= 0) return [];
 
+    const maxPosLimit = this.context?.wallet.riskLimits.maxPositionSize ?? 5;
+
     /* ── Enforce max_total_open_positions ── */
     const currentOpen = this.managedPositions.length;
     const slotsAvailable = Math.max(0, this.cfg.max_total_open_positions - currentOpen);
@@ -252,41 +254,44 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
 
       /* Compute setup score for this candidate */
       const score = this.computeSetupScore(market);
+      if (score.value < 0.60) continue; // Require high setup quality
 
-      /* Base size scaled by score (higher score → bigger position) */
-      const baseUsd = capital * this.cfg.base_risk_pct;
-      let positionUsd = baseUsd * (1 + score.value);  // score adds 0-100% to base
-      positionUsd = Math.min(positionUsd, this.cfg.max_position_usd_per_market);
-      positionUsd = Math.max(positionUsd, 1); // minimum $1
+      /* Entry price calculated and rounded to 2 decimal places for Polymarket CLOB */
+      const rawPrice = this.computeEntryPrice(market, order.side);
+      const entryPrice = Math.max(0.01, Math.min(0.99, Number((Math.round(rawPrice * 100) / 100).toFixed(2))));
 
-      /* Kelly-fraction cap: don't bet more than edge / odds implies */
-      const kellyFraction = this.computeKellyFraction(market, score);
-      const kellyMax = capital * kellyFraction;
-      positionUsd = Math.min(positionUsd, kellyMax);
+      /* Base size scaled by score, respecting wallet limits */
+      const baseUsd = capital * (this.cfg.base_risk_pct ?? 0.05);
+      let positionUsd = baseUsd * (1 + score.value * 0.5);
+      positionUsd = Math.min(positionUsd, this.cfg.max_position_usd_per_market ?? maxPosLimit);
+      positionUsd = Math.min(positionUsd, maxPosLimit);
 
-      /* Convert USD to shares at the entry price */
-      const entryPrice = this.computeEntryPrice(market, order.side);
-      const shares = Math.floor(positionUsd / entryPrice);
+      /* Enforce MLE per-market cap */
+      const maxMle = capital * (this.cfg.max_market_mle_pct ?? 0.25);
+      positionUsd = Math.min(positionUsd, maxMle);
+
+      /* Convert USD to integer shares */
+      const minShares = Math.ceil(1.00 / entryPrice);
+      let shares = Math.floor(positionUsd / entryPrice);
+      if (shares < 1) {
+        if (1.00 <= maxPosLimit && 1.00 <= maxMle + 1.0) {
+          shares = minShares;
+        } else {
+          continue;
+        }
+      }
+
+      if (shares * entryPrice > maxPosLimit || shares * entryPrice > maxMle + 0.01) {
+        shares = Math.floor(Math.min(maxPosLimit, maxMle) / entryPrice);
+      }
       if (shares < 1) continue;
 
-      /* MLE check: max loss at resolution for this market */
-      const mle = entryPrice * shares; // max we could lose if resolves to 0
-      const mlePct = mle / capital;
-      if (mlePct > this.cfg.max_market_mle_pct) continue;
-
-      /* Total MLE across all managed positions */
-      const totalMle = this.managedPositions.reduce(
-        (sum, p) => sum + p.costBasis,
-        0,
-      ) + mle;
-      if (totalMle / capital > this.cfg.max_total_mle_pct) continue;
-
       /* Cluster exposure check */
-      if (!this.checkClusterExposure(market, positionUsd)) continue;
+      if (!this.checkClusterExposure(market, shares * entryPrice)) continue;
 
       sized.push({
         ...order,
-        price: Number(entryPrice.toFixed(4)),
+        price: entryPrice,
         size: shares,
         strategy: this.name,
       });

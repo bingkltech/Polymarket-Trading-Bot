@@ -14,12 +14,12 @@ import { Signal, MarketData, OrderRequest } from '../../types';
    6. Spread-aware position management with grace periods to avoid immediate stop-outs
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
-const MIN_VOLUME = 500;
-const MIN_LIQUIDITY = 100;
+const MIN_VOLUME = 2500;
+const MIN_LIQUIDITY = 1000;
 const STALE_MS = 300_000; // 5 minutes (avoids dropping active live books)
-const MIN_DISLOCATION = 0.015; // Minimum 1.5 cents edge required to cover spread friction
-const MAX_CONFIDENCE = 0.90;
-const MAX_POSITIONS = 5;
+const MIN_DISLOCATION = 0.03; // Minimum 3 cents edge required
+const MAX_CONFIDENCE = 0.95;
+const MAX_POSITIONS = 2; // Maximum 2 concurrent high-probability bets
 
 /** Rolling price snapshot for VWAP estimation */
 interface PriceSnapshot {
@@ -42,7 +42,7 @@ interface MispricingPosition {
 
 export class MispricingArbitrageStrategy extends BaseStrategy {
   readonly name = 'mispricing_arbitrage';
-  protected override cooldownMs = 60_000;
+  protected override cooldownMs = 180_000; // 3 min patient cooldown
 
   private positions: MispricingPosition[] = [];
   private priceSnapshots = new Map<string, PriceSnapshot[]>();
@@ -81,7 +81,7 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
       if (!this.passesFilters(market, now)) continue;
 
       const score = this.computeMispricingScore(marketId, market, eventGroups);
-      if (score.total < 0.35) continue; // High-confidence threshold
+      if (score.total < 0.65) continue; // Require high statistical confidence
 
       const snaps = this.priceSnapshots.get(marketId) ?? [];
       const vwap = this.computeVWAP(snaps);
@@ -102,7 +102,7 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
           direction = 'NO';
           edge = yesPrice - vwap;
         }
-      } else if (score.meanRev > 0.6) {
+      } else if (score.meanRev > 0.75) {
         // Statistical mean-reversion opportunity
         const prices = snaps.map((s) => s.price);
         const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
@@ -129,7 +129,7 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
       // Net Edge Calculation: deduct estimated exchange fees (100 bps / ~1.0% round-trip)
       const roundTripFee = 0.01;
       const netEdge = edge - roundTripFee;
-      if (netEdge <= 0.005) continue; // Require positive net edge after fees
+      if (netEdge <= 0.01) continue; // Require at least 1c net edge after fees
 
       const confidence = Math.min(MAX_CONFIDENCE, score.total * 1.1);
 
@@ -151,7 +151,7 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
   override sizePositions(signals: Signal[]): OrderRequest[] {
     const capital = this.context?.wallet.availableBalance ?? 20;
     const walletId = this.context?.wallet.walletId ?? 'unknown';
-    const maxSizeLimit = this.context?.wallet.riskLimits.maxPositionSize ?? 1;
+    const maxSizeLimit = this.context?.wallet.riskLimits.maxPositionSize ?? 5;
     const now = Date.now();
 
     return signals
@@ -163,9 +163,6 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
       .map((signal) => {
         const market = this.markets.get(signal.marketId);
 
-        // Polymarket exchange minimum is 5 shares (lowest valid bet on CLOB)
-        const size = Math.max(5, Math.min(maxSizeLimit, 5));
-
         // Taker price calculation with tick size alignment (2 decimals)
         let price: number;
         if (signal.outcome === 'YES') {
@@ -176,6 +173,13 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
 
         const safePrice = Number((Math.round(price * 100) / 100).toFixed(2));
         const boundedPrice = Math.max(0.01, Math.min(0.99, safePrice));
+
+        // Enforce $1.00 min notional and max position size limit ($5)
+        const minShares = Math.ceil(1.00 / boundedPrice);
+        let size = Math.max(minShares, Math.min(5, Math.floor(maxSizeLimit / boundedPrice)));
+        if (size * boundedPrice > maxSizeLimit) {
+          size = Math.max(minShares, Math.floor(maxSizeLimit / boundedPrice));
+        }
 
         return {
           walletId,
@@ -390,7 +394,10 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
     if (now - market.timestamp > STALE_MS) return false;
 
     const yesPrice = market.outcomePrices[0] ?? 0.5;
-    if (yesPrice < 0.05 || yesPrice > 0.95) return false;
+    const leadingProb = Math.max(yesPrice, 1 - yesPrice);
+    
+    // Strictly High-Probability: Only bet when leading probability is 75% - 96%
+    if (leadingProb < 0.75 || leadingProb > 0.96) return false;
 
     // Reject markets experiencing violent 5c price spikes (adverse selection)
     if (this.isAdverseSpike(market.marketId)) return false;
