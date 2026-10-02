@@ -16,7 +16,7 @@ import { Signal, MarketData, OrderRequest } from '../../types';
 
 const MIN_VOLUME = 500;
 const MIN_LIQUIDITY = 100;
-const STALE_MS = 60_000;
+const STALE_MS = 300_000; // 5 minutes (avoids dropping active live books)
 const MIN_DISLOCATION = 0.015; // Minimum 1.5 cents edge required to cover spread friction
 const MAX_CONFIDENCE = 0.90;
 const MAX_POSITIONS = 5;
@@ -367,6 +367,14 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
     return 0;
   }
 
+  private isAdverseSpike(marketId: string): boolean {
+    const snaps = this.priceSnapshots.get(marketId) ?? [];
+    if (snaps.length < 4) return false;
+    const oldest = snaps[Math.max(0, snaps.length - 5)].price;
+    const current = snaps[snaps.length - 1].price;
+    return Math.abs(current - oldest) >= 0.05; // 5c violent price shock
+  }
+
   private passesFilters(market: MarketData, now: number): boolean {
     if (market.volume24h < MIN_VOLUME) return false;
     if (market.liquidity < MIN_LIQUIDITY) return false;
@@ -374,6 +382,9 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
 
     const yesPrice = market.outcomePrices[0] ?? 0.5;
     if (yesPrice < 0.05 || yesPrice > 0.95) return false;
+
+    // Reject markets experiencing violent 5c price spikes (adverse selection)
+    if (this.isAdverseSpike(market.marketId)) return false;
 
     return true;
   }

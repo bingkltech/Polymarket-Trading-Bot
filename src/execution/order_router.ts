@@ -19,8 +19,8 @@ export class OrderRouter {
     const lastAttempt = this.orderCooldowns.get(cooldownKey) ?? 0;
     const now = Date.now();
     
-    // Enforce 10-second cooldown to prevent infinite loop log spam on rejected orders
-    if (now - lastAttempt < 10000) {
+    // Enforce 10-second cooldown on BUY orders to prevent spamming failed bids
+    if (order.side === 'BUY' && now - lastAttempt < 10000) {
       return false; // Silently drop to prevent spam
     }
     this.orderCooldowns.set(cooldownKey, now);

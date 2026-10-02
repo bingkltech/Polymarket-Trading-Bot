@@ -146,12 +146,21 @@ export class PolymarketWallet {
     );
 
     try {
+      let feeRateBps = 0;
+      try {
+        if (typeof (this.clobClient as any).getFeeRateBps === 'function') {
+          feeRateBps = await (this.clobClient as any).getFeeRateBps(tokenId);
+        }
+      } catch {
+        feeRateBps = 0;
+      }
+
       const order = await this.clobClient.createOrder({
         tokenID: tokenId,
         price: safePrice,
         side: request.side as any,
         size: size,
-        feeRateBps: 0 
+        feeRateBps: feeRateBps ?? 0 
       });
 
       const response = await this.clobClient.postOrder(order);

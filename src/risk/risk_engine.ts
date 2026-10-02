@@ -1,4 +1,4 @@
-import { OrderRequest, WalletState } from '../types';
+﻿import { OrderRequest, WalletState } from '../types';
 import { KillSwitch } from './kill_switch';
 import { consoleLog } from '../reporting/console_log';
 
@@ -26,67 +26,60 @@ export class RiskEngine {
       return { ok: false, reason: 'Global kill switch active' };
     }
 
-    /* ── Balance check: prevent spending more than available ── */
+    /* ── BUY-Specific Risk Guardrails (Never block SELL / Exit orders) ── */
     if (order.side === 'BUY') {
       const orderCost = order.price * order.size;
       if (orderCost > wallet.availableBalance) {
         return { ok: false, reason: `Insufficient balance: need $${orderCost.toFixed(2)}, have $${wallet.availableBalance.toFixed(2)}` };
       }
+
+      const absSize = Math.abs(order.size);
+      if (absSize > wallet.riskLimits.maxPositionSize) {
+        return { ok: false, reason: 'Max position size exceeded' };
+      }
+
+      if (wallet.openPositions.length >= wallet.riskLimits.maxOpenTrades) {
+        return { ok: false, reason: 'Max open trades exceeded' };
+      }
+
+      if (wallet.realizedPnl <= -wallet.riskLimits.maxDailyLoss) {
+        return { ok: false, reason: 'Max daily loss breached' };
+      }
+
+      // 1. Dust Limit Quarantine (Polymarket requires orders >= $0.10)
+      if (orderCost < 0.10 && wallet.mode === 'LIVE') {
+        return { ok: false, reason: 'Dust Limit Veto: Order size under $0.10 threshold' };
+      }
+
+      // 2. Double-Bet / In-Flight Veto (Avoid overlapping resting limit orders)
+      const hasDuplicateOpen = ((wallet as any).openOrders || []).some(
+        (o: any) => o.marketId === order.marketId && o.outcome === order.outcome && o.side === order.side
+      );
+      if (hasDuplicateOpen) {
+        return { ok: false, reason: 'Double-Bet Quarantine: Resting order already exists for this outcome' };
+      }
+
+      // 3. Drawdown check: based on true cumulative loss, not deployed cash
+      const netLoss = Math.max(0, -wallet.realizedPnl);
+      const drawdownPct = wallet.capitalAllocated > 0 ? (netLoss / wallet.capitalAllocated) : 0;
+      if (drawdownPct > wallet.riskLimits.maxDrawdown) {
+        return { ok: false, reason: `Drawdown ${(drawdownPct * 100).toFixed(1)}% exceeds limit ${(wallet.riskLimits.maxDrawdown * 100).toFixed(1)}%` };
+      }
+
+      // 4. Per-market exposure check
+      const existingExposure = wallet.openPositions
+        .filter((p) => p.marketId === order.marketId)
+        .reduce((s, p) => s + Math.abs(p.avgPrice * p.size), 0);
+      if (existingExposure + orderCost > wallet.riskLimits.maxExposurePerMarket) {
+        return { ok: false, reason: 'Max exposure per market exceeded' };
+      }
     }
 
-    const absSize = Math.abs(order.size);
-    if (absSize > wallet.riskLimits.maxPositionSize) {
-      return { ok: false, reason: 'Max position size exceeded' };
-    }
-
-    if (wallet.openPositions.length >= wallet.riskLimits.maxOpenTrades) {
-      return { ok: false, reason: 'Max open trades exceeded' };
-    }
-
-    if (wallet.realizedPnl <= -wallet.riskLimits.maxDailyLoss) {
-      return { ok: false, reason: 'Max daily loss breached' };
-    }
-
-    /* 🔥 Polymarket Specific Guardrails (Inspired by Kalshi Simulator Lessons) 🔥 */
-
-    const orderCostFinal = order.price * order.size;
-    // 1. Dust Limit Quarantine (Polymarket requires orders >= $0.10)
-    if (orderCostFinal < 0.10 && wallet.mode === 'LIVE' && order.side === 'BUY') {
-      return { ok: false, reason: 'Dust Limit Veto: Order size under $0.10 threshold' };
-    }
-
-    // 2. Double-Bet / In-Flight Veto (Avoid overlapping resting limit orders)
-    const hasDuplicateOpen = ((wallet as any).openOrders || []).some(
-      (o: any) => o.marketId === order.marketId && o.outcome === order.outcome && o.side === order.side
-    );
-    if (hasDuplicateOpen) {
-      return { ok: false, reason: 'Double-Bet Quarantine: Resting order already exists for this outcome' };
-    }
-
-    // 3. Fake Confidence / Penalty Box check
-    // (If the wallet's cancel rate over the last 5 minutes is > 95% with > 20 orders, halt execution)
+    // 5. Fake Confidence / Penalty Box check
     const cancelRate = this.getCancelRate(wallet.walletId);
     const recentOrders = (this.orderTimestamps.get(wallet.walletId) ?? []).filter((t) => Date.now() - t < 300_000);
     if (cancelRate > 0.95 && recentOrders.length > 20) {
       return { ok: false, reason: 'Toxic Cancellation Veto: High fake-confidence spam detected. Halting.' };
-    }
-
-
-    /* ── Drawdown check ── */
-    const drawdownPct = wallet.capitalAllocated > 0
-      ? (wallet.capitalAllocated - wallet.availableBalance - this.getTotalUnrealisedValue(wallet)) / wallet.capitalAllocated
-      : 0;
-    if (drawdownPct > wallet.riskLimits.maxDrawdown) {
-      return { ok: false, reason: `Drawdown ${(drawdownPct * 100).toFixed(1)}% exceeds limit ${(wallet.riskLimits.maxDrawdown * 100).toFixed(1)}%` };
-    }
-
-    /* ── Per-market MLE check ── */
-    const orderCost = order.price * order.size;
-    const existingExposure = wallet.openPositions
-      .filter((p) => p.marketId === order.marketId)
-      .reduce((s, p) => s + Math.abs(p.avgPrice * p.size), 0);
-    if (existingExposure + orderCost > wallet.riskLimits.maxExposurePerMarket) {
-      return { ok: false, reason: 'Max exposure per market exceeded' };
     }
 
     /* ── Rate limiting: max orders per minute per wallet ── */
@@ -118,13 +111,5 @@ export class RiskEngine {
     const orders = (this.orderTimestamps.get(walletId) ?? []).filter((t) => now - t < 300_000);
     if (orders.length === 0) return 0;
     return cancels.length / orders.length;
-  }
-
-  /** Approximate total unrealised value of open positions */
-  private getTotalUnrealisedValue(wallet: WalletState): number {
-    return wallet.openPositions.reduce(
-      (sum, p) => sum + Math.abs(p.avgPrice * p.size),
-      0,
-    );
   }
 }
