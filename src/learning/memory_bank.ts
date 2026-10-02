@@ -56,6 +56,7 @@ export interface SettlementRecord {
 
 export class TradeMemoryBank {
   private db: Database.Database;
+  private static instance: TradeMemoryBank;
 
   constructor(dbPath = '.runtime/memory.db') {
     const dir = path.dirname(dbPath);
@@ -64,7 +65,15 @@ export class TradeMemoryBank {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this._initTables();
+    TradeMemoryBank.instance = this;
     logger.info({ dbPath }, 'Memory Bank initialised');
+  }
+
+  static getInstance(): TradeMemoryBank {
+    if (!TradeMemoryBank.instance) {
+      TradeMemoryBank.instance = new TradeMemoryBank();
+    }
+    return TradeMemoryBank.instance;
   }
 
   /* ── Schema ─────────────────────────────────────────────────── */

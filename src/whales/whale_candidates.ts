@@ -115,21 +115,6 @@ export class WhaleCandidates {
   /* ━━━━━━━━━━━━━━ Fetch recent trades ━━━━━━━━━━━━━━ */
 
   private async fetchRecentTrades(): Promise<ClobTradeScan[]> {
-    /* Primary: CLOB API */
-    try {
-      const url = `${this.clobApi}/trades?limit=500`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json() as ClobTradeScan[] | { trades?: ClobTradeScan[] };
-        return Array.isArray(data) ? data : (data.trades ?? []);
-      }
-      /* CLOB auth failed (401) or other error — fall through to data-api */
-      logger.debug({ status: res.status }, 'CLOB trades unavailable, falling back to data-api');
-    } catch {
-      logger.debug('CLOB trades fetch error, falling back to data-api');
-    }
-
-    /* Fallback: Polymarket data-api (public, no auth required) */
     return this.fetchFromDataApi();
   }
 

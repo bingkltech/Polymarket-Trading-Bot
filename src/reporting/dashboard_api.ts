@@ -47,6 +47,7 @@ export interface WalletDashboardEntry {
 export interface DashboardPayload {
   generatedAt: string;
   totalCapital: number;
+  totalBalance: number;
   totalPnl: number;
   totalRealizedPnl: number;
   totalUnrealizedPnl: number;
@@ -145,16 +146,18 @@ export function buildDashboardPayload(
     };
   });
 
-  const totalRealizedPnl = entries.reduce((s, e) => s + e.realizedPnl, 0);
-  const totalUnrealizedPnl = entries.reduce((s, e) => s + e.unrealizedPnl, 0);
+  const liveEntries = entries.filter(e => e.mode === 'LIVE');
+  const totalRealizedPnl = liveEntries.reduce((s, e) => s + e.realizedPnl, 0);
+  const totalUnrealizedPnl = liveEntries.reduce((s, e) => s + e.unrealizedPnl, 0);
 
   return {
     generatedAt: new Date().toISOString(),
-    totalCapital: entries.reduce((s, e) => s + e.capitalAllocated, 0),
+    totalCapital: liveEntries.reduce((s, e) => s + e.capitalAllocated, 0),
+    totalBalance: Number(liveEntries.reduce((s, e) => s + e.availableBalance, 0).toFixed(4)),
     totalPnl: Number((totalRealizedPnl + totalUnrealizedPnl).toFixed(4)),
     totalRealizedPnl: Number(totalRealizedPnl.toFixed(4)),
     totalUnrealizedPnl: Number(totalUnrealizedPnl.toFixed(4)),
-    activeWallets: entries.length,
-    wallets: entries,
+    activeWallets: liveEntries.length,
+    wallets: liveEntries, // Completely exclude paper wallets from the dashboard UI
   };
 }

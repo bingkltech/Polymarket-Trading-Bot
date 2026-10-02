@@ -66,7 +66,7 @@ export class Engine {
     this.stream.on('update', (data) => this.handleMarketUpdate(data));
   }
 
-  private antifreeze: AntiFreeze | null = null;
+  private antifreeze: any = null;
 
   async start(): Promise<void> {
     if (!this.antifreeze) {
@@ -84,12 +84,14 @@ export class Engine {
       if (runner.walletId.includes('live')) {
         try {
           const wallet = this.walletManager.getWallet(runner.walletId);
-          if (wallet && wallet.getMode() === 'LIVE') {
+          if (wallet && (wallet as any).mode === 'LIVE') {
             consoleLog.debug('SYSTEM', `Reconciling open orders for ${runner.walletId}...`);
             // In a full implementation, we'd call clobClient.getOpenOrders().
             // For now, we defensively clear the memory state to ensure we don't hold stale state on reconnect.
-            wallet.getState().openOrders = [];
-            AntiFreeze.resetStrategyMemory(runner.strategy.name);
+            if ((wallet as any).getState) {
+               ((wallet as any).getState() as any).openOrders = [];
+            }
+            this.antifreeze?.resetStrategyMemory(runner.strategy.name);
           }
         } catch (e) {
           logger.error({ err: e }, `Failed to reconcile wallet ${runner.walletId}`);

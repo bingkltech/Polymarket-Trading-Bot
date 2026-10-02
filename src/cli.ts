@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
@@ -193,7 +194,7 @@ program
     const dashboardServer = new DashboardServer(walletManager, dashboardPort);
 
     /* ── Deerflow Incubation Critic ── */
-    const memoryBank = new TradeMemoryBank();
+    const memoryBank = TradeMemoryBank.getInstance();
     const critic = new ModelCritic(memoryBank);
     critic.start();
     logger.info('Deerflow Model Critic active (30min grading loop)');

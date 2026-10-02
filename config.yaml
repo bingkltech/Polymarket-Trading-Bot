@@ -1,21 +1,19 @@
 environment:
   enable_live_trading: true
-  # DEERFLOW INCUBATION MODE — All strategies begin in PAPER with the
-  # hardened simulator. The Critic will graduate winners to LIVE.
+
 wallets:
-  - id: live_polymarket_wallet
+  - id: live_mispricing
     mode: LIVE
-    strategy: copy_trade
-    capital: 0
+    strategy: mispricing_arbitrage
+    capital: 20
     risk_limits:
-      max_position_size: 20
-      max_exposure_per_market: 30
-      max_daily_loss: 10
-      max_open_trades: 10
-      max_drawdown: 0.15
+      max_position_size: 5
+      max_exposure_per_market: 20
+      max_daily_loss: 5
+      max_open_trades: 5
+      max_drawdown: 0.10
+
 strategy_config:
-  cross_market_arbitrage:
-    min_edge: 0.03
   mispricing_arbitrage:
     min_dislocation: 0.02
   ai_forecast:
@@ -27,161 +25,3 @@ strategy_config:
   filtered_high_prob_convergence:
     enabled: true
     min_liquidity_usd: 10000
-    min_prob: 0.65
-    max_prob: 0.96
-    max_spread_bps: 200
-    max_days_to_resolution: 14
-    spike_pct: 0.08
-    spike_lookback_minutes: 60
-    min_depth_usd_within_1pct: 500
-    min_imbalance: 0.1
-    flow_lookback_minutes: 15
-    min_net_buy_flow_usd: 500
-    max_correlated_exposure_pct: 0.25
-    base_risk_pct: 0.005
-    max_position_usd_per_market: 200
-    max_total_open_positions: 10
-    ttl_seconds: 120
-    allow_take_on_momentum: false
-    take_profit_bps: 200
-    stop_loss_bps: 150
-    time_exit_hours: 48
-    max_daily_loss_pct: 0.03
-    max_weekly_drawdown_pct: 0.08
-    max_market_mle_pct: 0.05
-    max_total_mle_pct: 0.15
-    max_orders_per_minute: 10
-    max_cancel_rate: 0.5
-  copy_trade:
-    whale_addresses: []
-    copy_mode: mirror
-    data_api_url: https://data-api.polymarket.com
-    poll_interval_seconds: 30
-    max_trade_age_seconds: 120
-    min_trade_size_usd: 50
-    max_trade_size_usd: 100000
-    min_whale_win_rate: 0.5
-    size_mode: fixed
-    fixed_size: 10
-    proportional_factor: 0.1
-    max_capital_per_trade_pct: 0.05
-    max_shares_per_order: 50
-    max_open_positions: 15
-    max_exposure_per_market_usd: 500
-    max_daily_volume_usd: 5000
-    max_drawdown_pct: 0.15
-    max_consecutive_losses: 5
-    cooldown_after_loss_seconds: 300
-    take_profit_bps: 150
-    stop_loss_bps: 100
-    trailing_stop_activate_bps: 80
-    trailing_stop_distance_bps: 30
-    time_exit_minutes: 120
-    exit_on_whale_exit: true
-    blacklist_markets: []
-    whitelist_markets: []
-    min_market_liquidity: 500
-    min_market_volume_24h: 1000
-polymarket:
-  gamma_api: https://gamma-api.polymarket.com
-  clob_api: https://clob.polymarket.com
-whale_tracking:
-  enabled: true
-  dbPath: .runtime/whales.db
-  pollIntervalMs: 30000
-  backfillBatchSize: 100
-  maxRequestsPerMinute: 240
-  backoffBaseMs: 1000
-  backoffMaxMs: 60000
-  candidateScanIntervalMs: 300000
-  candidateMinVolumeUsd24h: 5000
-  candidateMinTrades24h: 5
-  candidateAutoTrackTopK: 5
-  scoreVersion: 1.0.0
-  scoreWeights:
-    profitability: 0.3
-    timingSkill: 0.2
-    lowSlippage: 0.15
-    consistency: 0.15
-    marketSelectionQuality: 0.1
-    recencyActiveness: 0.1
-  provisionalMinTrades: 30
-  provisionalMaxScore: 65
-  costBasisMethod: FIFO
-  timingWindows:
-    - 5
-    - 30
-    - 240
-    - 1440
-  alertDigestIntervalMs: 60000
-  largeTradeSigmaThreshold: 2.5
-  nearResolutionHours: 24
-  copy:
-    maxCopyDelaySeconds: 120
-    maxEntryDriftBps: 50
-    maxSpreadBps: 200
-    minDepthUsd: 1000
-    minLiquidityUsd: 5000
-    maxSizePerTradeUsd: 100
-    maxSizePerMarketUsd: 500
-    maxSizePerDayUsd: 2000
-    stopCopyDrawdownPct: 0.1
-    stopCopyMinScore: 40
-    minShadowWindowDays: 7
-  reconcileIntervalMs: 86400000
-  reconcileLookbackDays: 7
-  metadataCacheTtlMs: 3600000
-  scanner:
-    enabled: true
-    scanIntervalMs: 600000
-    marketsPerScan: 50
-    minMarketVolume24hUsd: 10000
-    minMarketLiquidityUsd: 10000
-    tradesPerMarket: 500
-    tradePageDepth: 5
-    minAddressTrades: 5
-    minAddressVolumeUsd: 5000
-    minWinRate: 0.52
-    minRoi: -0.1
-    autoPromoteEnabled: true
-    autoPromoteMinScore: 60
-    autoPromoteMaxPerScan: 10
-    bigTradeMinUsd: 3000
-    crossRefEnabled: true
-    crossRefMaxPerBatch: 15
-    clusterDetectionEnabled: true
-    clusterMinWhales: 2
-    clusterWindowHours: 48
-    parallelFetchBatch: 16
-    apiPool:
-      enabled: true
-      selectionStrategy: least-loaded
-      healthCheckIntervalMs: 120000
-      endpoints: null
-    fastScan:
-      enabled: true
-      intervalMs: 60000
-      topMarkets: 5
-      alertMinUsd: 5000
-    backfillDays: 7
-    polygonRpcUrl: https://polygon-rpc.com
-    usdcContractAddress: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-    networkGraphEnabled: true
-    copySimEnabled: true
-    copySimSlippageBps: 30
-    copySimDelaySeconds: 10
-    regimeAdaptiveEnabled: true
-    exchangeSources:
-      - exchange: polymarket
-        apiUrl: https://data-api.polymarket.com
-        enabled: true
-        maxRequestsPerMinute: 60
-      - exchange: kalshi
-        apiUrl: https://trading-api.kalshi.com/trade-api/v2
-        enabled: false
-        maxRequestsPerMinute: 30
-      - exchange: manifold
-        apiUrl: https://api.manifold.markets/v0
-        enabled: false
-        maxRequestsPerMinute: 60
-  telegramWebhookUrl: null

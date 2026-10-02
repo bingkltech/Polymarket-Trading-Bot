@@ -6,6 +6,8 @@ import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
 
 export class OrderRouter {
+  private orderCooldowns = new Map<string, number>();
+
   constructor(
     private readonly walletManager: WalletManager,
     private readonly riskEngine: RiskEngine,
@@ -13,6 +15,16 @@ export class OrderRouter {
   ) {}
 
   async route(order: OrderRequest): Promise<boolean> {
+    const cooldownKey = `${order.walletId}:${order.marketId}:${order.outcome}:${order.side}`;
+    const lastAttempt = this.orderCooldowns.get(cooldownKey) ?? 0;
+    const now = Date.now();
+    
+    // Enforce 10-second cooldown to prevent infinite loop log spam on rejected orders
+    if (now - lastAttempt < 10000) {
+      return false; // Silently drop to prevent spam
+    }
+    this.orderCooldowns.set(cooldownKey, now);
+
     const wallet = this.walletManager.getWallet(order.walletId);
     if (!wallet) {
       logger.warn({ walletId: order.walletId }, 'Wallet not found');

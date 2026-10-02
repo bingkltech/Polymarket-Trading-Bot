@@ -71,7 +71,9 @@ export class MarketFetcher {
       const response = await fetch(url);
 
       if (!response.ok) {
-        logger.error({ status: response.status, offset }, 'Gamma API page request failed');
+        if (response.status !== 422) {
+          logger.error({ status: response.status, offset }, 'Gamma API page request failed');
+        }
         break;
       }
 

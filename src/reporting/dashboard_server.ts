@@ -866,23 +866,23 @@ export class DashboardServer {
       const maxTrades = Number(body.maxOpenTrades ?? 10);
       const maxDd = Number(body.maxDrawdown ?? 0.2);
 
-      const wallet = new PaperWallet(
-        {
-          id: walletId,
-          mode: mode === 'LIVE' ? 'LIVE' : 'PAPER',
-          strategy,
-          capital,
-          riskLimits: {
-            maxPositionSize: maxPos,
-            maxExposurePerMarket: maxExp,
-            maxDailyLoss: maxLoss,
-            maxOpenTrades: maxTrades,
-            maxDrawdown: maxDd,
+      this.walletManager.registerWallet(
+          {
+            id: walletId,
+            mode: mode === 'LIVE' ? 'LIVE' : 'PAPER',
+            strategy,
+            capital,
+            riskLimits: {
+              maxPositionSize: maxPos,
+              maxExposurePerMarket: maxExp,
+              maxDailyLoss: maxLoss,
+              maxOpenTrades: maxTrades,
+              maxDrawdown: maxDd,
+            },
           },
-        },
-        strategy,
-      );
-      this.walletManager.addWallet(wallet);
+          strategy,
+          true // Force allow live from dashboard, the env var check above already protects it
+        );
 
       /* Connect the new wallet to the engine so its strategy runs */
       if (this.engine) {
@@ -900,6 +900,12 @@ export class DashboardServer {
         this.engine.removeRunner(walletId);
       }
       const removed = this.walletManager.removeWallet(walletId);
+        if (removed) {
+          try {
+            const { PaperWallet } = require('../wallets/paper_wallet');
+            PaperWallet.deletePersistedState(walletId);
+          } catch (e) {}
+        }
       if (removed) {
         json(res, 200, { ok: true, message: `Wallet "${walletId}" removed` });
       } else {
@@ -2386,6 +2392,7 @@ function renderSummary(d){
   $('#summary').innerHTML=
     '<div class="s-card"><div class="label">Active Wallets</div><div class="value">'+d.activeWallets+'</div></div>'+
     '<div class="s-card"><div class="label">Total Capital</div><div class="value">$'+fmt(d.totalCapital,0)+'</div></div>'+
+      '<div class="s-card"><div class="label">Total Balance</div><div class="value">$'+fmt(d.totalBalance,2)+'</div></div>'+
     '<div class="s-card"><div class="label">Realized PnL</div><div class="value '+pnlCls(rPnl)+'">$'+fmt(rPnl)+'</div></div>'+
     '<div class="s-card"><div class="label">Unrealized PnL</div><div class="value '+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</div></div>'+
     '<div class="s-card"><div class="label">Total PnL</div><div class="value '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+

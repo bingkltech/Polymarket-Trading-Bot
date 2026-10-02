@@ -276,6 +276,34 @@ export class WhaleIngestion {
     after?: string,
     limit = 100,
   ): Promise<ClobTrade[]> {
+    try {
+      let url = `https://data-api.polymarket.com/trades?user=${address}&limit=${limit}`;
+      if (after) url += `&after=${encodeURIComponent(after)}`;
+      this.recordRequest();
+      const res = await this.fetchWithRetry(url);
+      if (res && res.ok) {
+        const data = await res.json() as any[];
+        if (Array.isArray(data)) {
+          return data.map((t) => ({
+            id: t.id || t.transactionHash || `trade_${Date.now()}_${Math.random()}`,
+            market: t.market || t.conditionId || '',
+            asset_id: t.asset || t.asset_id || t.tokenId || '',
+            side: (t.side || 'BUY').toUpperCase() as 'BUY' | 'SELL',
+            size: String(t.size || t.amount || 0),
+            price: String(t.price || 0),
+            status: 'MATCHED',
+            taker_order_id: '',
+            match_time: t.timestamp ? new Date(t.timestamp * 1000).toISOString() : (t.match_time || new Date().toISOString()),
+            owner: t.user || t.owner || address,
+            maker_address: t.maker_address || address,
+            fee_rate_bps: '0',
+          }));
+        }
+      }
+    } catch {
+      // Fall through to primary CLOB endpoint
+    }
+
     let url = `${this.clobApi}/trades?maker_address=${address}&limit=${limit}`;
     if (after) url += `&after=${encodeURIComponent(after)}`;
 

@@ -1,7 +1,7 @@
 const ethers = require('ethers');
 
 // ethers v5 syntax
-const provider = new ethers.providers.JsonRpcProvider('https://rpc-mainnet.maticvigil.com');
+const provider = new ethers.providers.JsonRpcProvider('https://rpc.ankr.com/polygon');
 const usdcAddress = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'; 
 const abi = ['function balanceOf(address owner) view returns (uint256)'];
 const contract = new ethers.Contract(usdcAddress, abi, provider);

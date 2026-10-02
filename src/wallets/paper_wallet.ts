@@ -5,6 +5,12 @@ import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
 import { OrderbookStream } from '../data/orderbook_stream';
 import { ClobFetcher } from '../data/clob_fetcher';
+import { TradeMemoryBank } from '../learning/memory_bank';
+
+import * as fs from 'fs';
+import * as path from 'path';
+
+const PERSISTENCE_FILE = '.runtime/paper_wallets.json';
 
 export class PaperWallet {
   private state: WalletState;
@@ -12,6 +18,42 @@ export class PaperWallet {
   private readonly pnlTracker = new PnlTracker();
   private readonly trades: TradeRecord[] = [];
   private displayName: string = '';
+
+    static loadPersistedState(walletId: string): any {
+    try {
+      if (fs.existsSync(PERSISTENCE_FILE)) {
+        const data = JSON.parse(fs.readFileSync(PERSISTENCE_FILE, 'utf8'));
+        return data[walletId];
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  static deletePersistedState(walletId: string) {
+    try {
+      if (fs.existsSync(PERSISTENCE_FILE)) {
+        const data = JSON.parse(fs.readFileSync(PERSISTENCE_FILE, 'utf8'));
+        delete data[walletId];
+        fs.writeFileSync(PERSISTENCE_FILE, JSON.stringify(data, null, 2));
+      }
+    } catch (e) {}
+  }
+
+  private saveState() {
+    try {
+      let data: any = {};
+      if (fs.existsSync(PERSISTENCE_FILE)) {
+        data = JSON.parse(fs.readFileSync(PERSISTENCE_FILE, 'utf8'));
+      }
+      data[this.state.walletId] = {
+        state: this.state,
+        displayName: this.displayName,
+        trades: this.trades
+      };
+      fs.mkdirSync(path.dirname(PERSISTENCE_FILE), { recursive: true });
+      fs.writeFileSync(PERSISTENCE_FILE, JSON.stringify(data, null, 2));
+    } catch (e) {}
+  }
 
   constructor(
     config: WalletConfig,
@@ -38,6 +80,14 @@ export class PaperWallet {
         maxDrawdown: config.riskLimits?.maxDrawdown ?? 0.2,
       },
     };
+    const saved = PaperWallet.loadPersistedState(config.id);
+    if (saved && saved.state) {
+      this.state = saved.state;
+      this.state.assignedStrategy = assignedStrategy;
+      this.state.capitalAllocated = config.capital;
+      this.displayName = saved.displayName || config.id;
+      if (saved.trades) this.trades.push(...saved.trades);
+    }
   }
 
   setDependencies(stream: OrderbookStream, clobFetcher: ClobFetcher): void {
@@ -56,6 +106,7 @@ export class PaperWallet {
 
   updateBalance(delta: number): void {
     this.state.availableBalance += delta;
+    this.saveState();
   }
 
   getDisplayName(): string {
@@ -64,6 +115,7 @@ export class PaperWallet {
 
   setDisplayName(name: string): void {
     this.displayName = name.trim() || this.state.walletId;
+    this.saveState();
   }
 
   updateRiskLimits(limits: Partial<RiskLimits>): void {
@@ -72,7 +124,8 @@ export class PaperWallet {
     if (limits.maxDailyLoss !== undefined) this.state.riskLimits.maxDailyLoss = limits.maxDailyLoss;
     if (limits.maxOpenTrades !== undefined) this.state.riskLimits.maxOpenTrades = limits.maxOpenTrades;
     if (limits.maxDrawdown !== undefined) this.state.riskLimits.maxDrawdown = limits.maxDrawdown;
-    logger.info({ walletId: this.state.walletId, riskLimits: this.state.riskLimits }, 'Risk limits updated');
+    logger.info({ walletId: this.state.walletId, riskLimits: this.state.riskLimits }, "Risk limits updated");
+    this.saveState();
   }
 
   async placeOrder(request: {
@@ -99,7 +152,20 @@ export class PaperWallet {
       this.state.realizedPnl -= fill.gasFee; // Treat gas as realized loss
     }
 
+    const memoryBank = TradeMemoryBank.getInstance();
+
     if ((fill as any).rejected) {
+      memoryBank.logOrder({
+        orderId: fill.orderId,
+        marketId: fill.marketId,
+        strategy: this.state.assignedStrategy,
+        outcome: fill.outcome,
+        side: fill.side,
+        price: request.price,
+        size: request.size,
+        status: 'cancelled', // rejected
+        createdAt: new Date().toISOString()
+      });
       return; // Stop processing, no actual size was traded
     }
 
@@ -130,6 +196,33 @@ export class PaperWallet {
       cumulativePnl: this.state.realizedPnl,
       balanceAfter: this.state.availableBalance,
       timestamp: fill.timestamp,
+    });
+
+    memoryBank.logOrder({
+      orderId: fill.orderId,
+      marketId: fill.marketId,
+      strategy: this.state.assignedStrategy,
+      outcome: fill.outcome,
+      side: fill.side,
+      price: request.price,
+      size: request.size,
+      status: 'filled',
+      createdAt: new Date(fill.timestamp).toISOString()
+    });
+
+    memoryBank.logFill({
+      fillId: `fill_${fill.orderId}_${Date.now()}`,
+      orderId: fill.orderId,
+      marketId: fill.marketId,
+      strategy: this.state.assignedStrategy,
+      outcome: fill.outcome,
+      side: fill.side,
+      intendedPrice: request.price,
+      actualPrice: fill.price,
+      size: fill.size,
+      slippageBps: Math.abs(fill.price - request.price) / request.price * 10000,
+      latencyMs: (fill as any).latencyMs ?? 0,
+      filledAt: new Date(fill.timestamp).toISOString()
     });
 
     const MAX_TRADES = 1000;

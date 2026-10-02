@@ -50,14 +50,14 @@ export class RiskEngine {
     /* 🔥 Polymarket Specific Guardrails (Inspired by Kalshi Simulator Lessons) 🔥 */
 
     const orderCostFinal = order.price * order.size;
-    // 1. Dust Limit Quarantine (Polymarket actively rejects CLOB limit orders < $5)
-    if (orderCostFinal < 5.00 && wallet.mode === 'LIVE' && order.side === 'BUY') {
-      return { ok: false, reason: 'Dust Limit Veto: Order size under $5.00 Polymarket threshold' };
+    // 1. Dust Limit Quarantine (Polymarket requires orders >= $0.10)
+    if (orderCostFinal < 0.10 && wallet.mode === 'LIVE' && order.side === 'BUY') {
+      return { ok: false, reason: 'Dust Limit Veto: Order size under $0.10 threshold' };
     }
 
     // 2. Double-Bet / In-Flight Veto (Avoid overlapping resting limit orders)
     const hasDuplicateOpen = ((wallet as any).openOrders || []).some(
-      (o) => o.marketId === order.marketId && o.outcome === order.outcome && o.side === order.side
+      (o: any) => o.marketId === order.marketId && o.outcome === order.outcome && o.side === order.side
     );
     if (hasDuplicateOpen) {
       return { ok: false, reason: 'Double-Bet Quarantine: Resting order already exists for this outcome' };

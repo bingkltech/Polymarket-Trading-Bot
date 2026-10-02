@@ -89,60 +89,34 @@ export class CrossMarketArbitrageStrategy extends BaseStrategy {
     if (this.positions.length >= MAX_POSITIONS) return signals;
 
     const now = Date.now();
+    const feeCost = (TAKER_FEE_BPS / 10_000) * 2; // Approximated full round trip or multi-leg fees
 
-    // ── Mode 1: Binary arb (YES+NO ≠ 1.0) ────────────────────
+    // ── Mode 1: Binary arb (crossed book) ────────────────────
     for (const [, market] of this.markets) {
       if (!this.passesFilters(market, now)) continue;
-      if (market.outcomePrices.length < 2) continue;
-
-      const yesPrice = market.outcomePrices[0];
-      const noPrice = market.outcomePrices[1];
-      const totalPrice = yesPrice + noPrice;
-      const halfSpread = market.spread / 2;
-      const feeCost = (TAKER_FEE_BPS / 10_000) * 2; // fee on each side
-
-      if (totalPrice < 1 - 0.005) {
-        // Can buy both for < $1. Gross edge = 1 - totalPrice
-        const grossEdge = 1 - totalPrice;
-        const netEdge = grossEdge - halfSpread * 2 - feeCost;
+      
+      const yesAsk = market.ask;
+      const noAsk = 1 - market.bid; // To buy NO, you pay 1 - YES_bid
+      
+      const totalCost = yesAsk + noAsk;
+      
+      // Real binary arbitrage only exists if the book is crossed (spread < 0)
+      if (totalCost < 1 - feeCost) {
+        const netEdge = 1 - totalCost - feeCost;
         if (netEdge * 10_000 < MIN_NET_EDGE_BPS) continue;
-
+        
         const conf = this.computeConfidence(netEdge, market);
-        // Buy the cheaper side (or both if edge is large enough)
-        const cheaperSide: 'YES' | 'NO' = yesPrice <= noPrice ? 'YES' : 'NO';
         signals.push({
           marketId: market.marketId,
-          outcome: cheaperSide,
+          outcome: 'YES',
           side: 'BUY',
           confidence: conf,
           edge: netEdge,
         });
-
-        // If net edge is large enough, buy both sides (guaranteed $1 payout)
-        if (netEdge > 0.015) {
-          const otherSide: 'YES' | 'NO' = cheaperSide === 'YES' ? 'NO' : 'YES';
-          signals.push({
-            marketId: market.marketId,
-            outcome: otherSide,
-            side: 'BUY',
-            confidence: conf * 0.9,
-            edge: netEdge,
-          });
-        }
-      }
-
-      if (totalPrice > 1 + 0.005) {
-        // Overpriced: sell the expensive side
-        const grossEdge = totalPrice - 1;
-        const netEdge = grossEdge - halfSpread * 2 - feeCost;
-        if (netEdge * 10_000 < MIN_NET_EDGE_BPS) continue;
-
-        const conf = this.computeConfidence(netEdge, market);
-        const expensiveSide: 'YES' | 'NO' = yesPrice >= noPrice ? 'YES' : 'NO';
         signals.push({
           marketId: market.marketId,
-          outcome: expensiveSide,
-          side: 'SELL',
+          outcome: 'NO',
+          side: 'BUY',
           confidence: conf,
           edge: netEdge,
         });
@@ -153,47 +127,41 @@ export class CrossMarketArbitrageStrategy extends BaseStrategy {
     const eventGroups = this.groupByEvent();
     for (const [, group] of eventGroups) {
       if (group.length < 2) continue;
+      
+      // Ensure all markets in the group pass basic filters
+      if (!group.every(m => this.passesFilters(m, now))) continue;
 
-      // Sum of YES prices across related markets in the same event
-      const totalYes = group.reduce((sum, m) => sum + m.outcomePrices[0], 0);
-      // For mutually exclusive outcomes, YES prices should sum to ~1.0
-      // Allow for slight deviation (this is common in multi-outcome events)
-      const deviation = Math.abs(totalYes - 1);
+      // Arbitrage 1: Buy YES on all outcomes
+      const totalYesAsk = group.reduce((sum, m) => sum + m.ask, 0);
+      if (totalYesAsk < 1 - feeCost) {
+        const netEdge = 1 - totalYesAsk - feeCost;
+        if (netEdge * 10_000 >= MIN_NET_EDGE_BPS) {
+          for (const m of group) {
+            signals.push({
+              marketId: m.marketId,
+              outcome: 'YES',
+              side: 'BUY',
+              confidence: this.computeConfidence(netEdge, m) * 0.9,
+              edge: netEdge,
+            });
+          }
+        }
+      }
 
-      if (deviation > 0.03 && deviation < 0.25) {
-        // Find the most underpriced and overpriced markets in the group
-        const sorted = [...group].sort(
-          (a, b) => a.outcomePrices[0] - b.outcomePrices[0],
-        );
-
-        if (totalYes < 1) {
-          // Underpriced: buy the cheapest YES
-          const cheapest = sorted[0];
-          if (!this.passesFilters(cheapest, now)) continue;
-          const netEdge = deviation / group.length - (TAKER_FEE_BPS / 10_000);
-          if (netEdge * 10_000 < MIN_NET_EDGE_BPS) continue;
-
-          signals.push({
-            marketId: cheapest.marketId,
-            outcome: 'YES',
-            side: 'BUY',
-            confidence: this.computeConfidence(netEdge, cheapest) * 0.85,
-            edge: netEdge,
-          });
-        } else {
-          // Overpriced: sell the most expensive YES
-          const expensive = sorted[sorted.length - 1];
-          if (!this.passesFilters(expensive, now)) continue;
-          const netEdge = deviation / group.length - (TAKER_FEE_BPS / 10_000);
-          if (netEdge * 10_000 < MIN_NET_EDGE_BPS) continue;
-
-          signals.push({
-            marketId: expensive.marketId,
-            outcome: 'YES',
-            side: 'SELL',
-            confidence: this.computeConfidence(netEdge, expensive) * 0.85,
-            edge: netEdge,
-          });
+      // Arbitrage 2: Buy NO on all outcomes (Requires sum of YES bids > 1)
+      const totalYesBid = group.reduce((sum, m) => sum + m.bid, 0);
+      if (totalYesBid > 1 + feeCost) {
+        const netEdge = totalYesBid - 1 - feeCost;
+        if (netEdge * 10_000 >= MIN_NET_EDGE_BPS) {
+          for (const m of group) {
+            signals.push({
+              marketId: m.marketId,
+              outcome: 'NO',
+              side: 'BUY',
+              confidence: this.computeConfidence(netEdge, m) * 0.9,
+              edge: netEdge,
+            });
+          }
         }
       }
     }

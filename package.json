@@ -7,6 +7,7 @@
     "bot": "dist/cli.js"
   },
   "scripts": {
+    "incubate:reset": "node scripts/incubate_reset.js && npm run dev",
     "dev": "tsx src/cli.ts start --config config.yaml",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/cli.js start --config config.yaml",
@@ -19,6 +20,7 @@
     "@polymarket/clob-client": "^5.8.1",
     "better-sqlite3": "^12.6.2",
     "commander": "^12.1.0",
+    "dotenv": "^18.0.5",
     "ethers": "^5.7.2",
     "pino": "^9.3.2",
     "pino-pretty": "^11.2.0",

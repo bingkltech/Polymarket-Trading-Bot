@@ -1,4 +1,30 @@
 import { PaperWallet } from './paper_wallet';
+import * as fs from 'fs';
+import * as path from 'path';
+const DELETED_WALLETS_FILE = '.runtime/deleted_wallets.json';
+function isWalletDeleted(walletId: string): boolean {
+  try {
+    if (fs.existsSync(DELETED_WALLETS_FILE)) {
+      const deleted = JSON.parse(fs.readFileSync(DELETED_WALLETS_FILE, 'utf8'));
+      return deleted.includes(walletId);
+    }
+  } catch (e) {}
+  return false;
+}
+function markWalletDeleted(walletId: string) {
+  try {
+    let deleted = [];
+    if (fs.existsSync(DELETED_WALLETS_FILE)) {
+      deleted = JSON.parse(fs.readFileSync(DELETED_WALLETS_FILE, 'utf8'));
+    }
+    if (!deleted.includes(walletId)) {
+      deleted.push(walletId);
+      fs.mkdirSync(path.dirname(DELETED_WALLETS_FILE), { recursive: true });
+      fs.writeFileSync(DELETED_WALLETS_FILE, JSON.stringify(deleted, null, 2));
+    }
+  } catch(e) {}
+}
+
 import { PolymarketWallet } from './polymarket_wallet';
 import { WalletState, WalletConfig, TradeRecord } from '../types';
 import { logger } from '../reporting/logs';
@@ -30,7 +56,8 @@ export class WalletManager {
   private clobFetcher?: ClobFetcher;
 
   /** Inject real-time dependencies so new PaperWallets can calculate VWAP slippage */
-  setPaperDependencies(stream: OrderbookStream, clobFetcher: ClobFetcher): void {
+  setPaperDependencies(stream: OrderbookStream, clobFetcher: ClobFetcher): void { this.setDependencies(stream, clobFetcher); }
+  setDependencies(stream: OrderbookStream, clobFetcher: ClobFetcher): void {
     this.stream = stream;
     this.clobFetcher = clobFetcher;
     for (const wallet of this.wallets.values()) {
@@ -42,6 +69,10 @@ export class WalletManager {
   }
 
   registerWallet(config: WalletConfig, assignedStrategy: string, enableLive: boolean): void {
+    if (config.mode === 'PAPER' && isWalletDeleted(config.id)) {
+      logger.info({ walletId: config.id }, 'Skipping registration of permanently deleted paper wallet');
+      return;
+    }
     if (this.wallets.has(config.id)) {
       throw new Error(`Wallet ${config.id} already registered`);
     }
@@ -56,7 +87,7 @@ export class WalletManager {
 
     const wallet =
       config.mode === 'LIVE'
-        ? new PolymarketWallet(config, assignedStrategy)
+        ? new PolymarketWallet(config, assignedStrategy, this.stream)
         : new PaperWallet(config, assignedStrategy, this.stream, this.clobFetcher);
 
     this.wallets.set(config.id, wallet);
@@ -90,9 +121,14 @@ export class WalletManager {
   }
 
   removeWallet(walletId: string): boolean {
-    if (!this.wallets.has(walletId)) {
-      return false;
+    const wallet = this.wallets.get(walletId);
+    if (!wallet) return false;
+    
+    // If it's a paper wallet, mark it as permanently deleted
+    if (wallet.getState().mode === 'PAPER') {
+      markWalletDeleted(walletId);
     }
+    
     this.wallets.delete(walletId);
     logger.info({ walletId }, `Wallet ${walletId} removed`);
     return true;
