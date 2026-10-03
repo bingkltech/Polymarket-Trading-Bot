@@ -636,13 +636,24 @@ export class PolymarketWallet {
         return;
       }
     } else {
-      // SELL: Don't sell more than we hold
+      // SELL: Don't sell more than we hold, accounting for active resting sell orders on CLOB
       const existingPos = this.state.openPositions.find(
         (p) => p.marketId === request.marketId && p.outcome === request.outcome
       );
-      if (existingPos) {
-        size = Math.min(size, existingPos.size);
+      const heldSize = existingPos ? existingPos.size : size;
+      const lockedSellShares = this.openOrders
+        .filter((o) => (o.asset_id === tokenId || o.market === request.marketId) && (o.side === 'SELL' || String(o.side).toUpperCase() === 'SELL'))
+        .reduce((sum, o) => sum + (parseFloat(o.original_size || o.size || '0') - parseFloat(o.size_matched || '0')), 0);
+      
+      const availableToSell = Math.max(0, heldSize - lockedSellShares);
+      if (availableToSell < 5 && lockedSellShares > 0) {
+        logger.info(
+          { marketId: request.marketId, heldSize, lockedSellShares },
+          'Position already has active resting SELL order on CLOB. Skipping redundant exit order.'
+        );
+        return;
       }
+      size = Math.min(size, availableToSell);
     }
 
     if (size <= 0) {
