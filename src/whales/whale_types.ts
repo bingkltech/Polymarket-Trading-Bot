@@ -716,8 +716,8 @@ export const DEFAULT_SCANNER_CONFIG: ScannerConfig = {
   marketsPerScan: 20,
   minMarketLiquidityUsd: 10_000,
   minMarketVolume24hUsd: 5_000,
-  tradesPerMarket: 500,
-  tradePageDepth: 3,
+  tradesPerMarket: 200,
+  tradePageDepth: 2,
   minAddressVolumeUsd: 5_000,
   minAddressTrades: 5,
   minWinRate: 0.55,
@@ -731,7 +731,7 @@ export const DEFAULT_SCANNER_CONFIG: ScannerConfig = {
   clusterDetectionEnabled: true,
   clusterMinWhales: 3,
   clusterWindowHours: 24,
-  parallelFetchBatch: 5,
+  parallelFetchBatch: 4,
   apiPool: { ...DEFAULT_API_POOL_CONFIG },
   fastScan: { ...DEFAULT_FAST_SCAN_CONFIG },
   backfillDays: 7,
@@ -806,7 +806,7 @@ export interface WhaleTrackingConfig {
 }
 
 export const DEFAULT_WHALE_CONFIG: WhaleTrackingConfig = {
-  enabled: true,
+  enabled: false,
   dbPath: '.runtime/whales.db',
   pollIntervalMs: 30_000,
   backfillBatchSize: 100,

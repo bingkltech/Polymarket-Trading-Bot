@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { ClobClient, SignatureTypeV2, AssetType } from '@polymarket/clob-client-v2';
 import { ethers } from 'ethers';
 import { logger } from '../reporting/logs';
@@ -54,11 +55,11 @@ export class PolymarketConnector {
         const pk = process.env.Wallet_Private_Key || process.env.POLYGON_PRIVATE_KEY;
         const proxyAddress = process.env.Polymarket_wallet_Address || process.env.Signer_Address || process.env.POLYMARKET_PROXY_ADDRESS;
 
-        // 1. Determine Intent
-        const canTrade = apiKey && secret && passphrase && pk && proxyAddress;
+        // 1. Determine Intent: pk & proxyAddress are sufficient to derive or use credentials
+        const canTrade = Boolean(pk && proxyAddress);
         
         if (!canTrade && forceLive) {
-            status.errors.push('Live trading forced but credentials missing in .env');
+            status.errors.push('Live trading forced but credentials (Wallet_Private_Key or proxyAddress) missing in .env');
             return status;
         }
 
@@ -198,5 +199,9 @@ export class PolymarketConnector {
 
     getClient(): ClobClient | null {
         return this.clobClient;
+    }
+
+    getFunderAddress(): string | undefined {
+        return process.env.Polymarket_wallet_Address || process.env.Signer_Address || process.env.POLYMARKET_PROXY_ADDRESS;
     }
 }

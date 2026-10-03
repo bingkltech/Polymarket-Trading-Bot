@@ -63,6 +63,7 @@ export interface OrderFill {
 
 export interface MarketData {
   marketId: string;
+  conditionId?: string;
   question: string;
   slug: string;
   outcomes: string[];
@@ -142,6 +143,10 @@ export interface Position {
   size: number;
   avgPrice: number;
   realizedPnl: number;
+  entryFee?: number;
+  title?: string;
+  curPrice?: number;
+  currentValue?: number;
 }
 
 export interface WalletState {
@@ -150,6 +155,7 @@ export interface WalletState {
   assignedStrategy: string;
   capitalAllocated: number;
   availableBalance: number;
+  onChainBalance?: number;
   openPositions: Position[];
   realizedPnl: number;
   riskLimits: RiskLimits;
@@ -171,3 +177,32 @@ export interface TradeRecord {
   balanceAfter: number;
   timestamp: number;
 }
+
+export interface OpenOrder {
+  id: string;
+  marketId: string;
+  tokenId: string;
+  side: OrderSide;
+  outcome: OrderOutcome;
+  price: number;
+  originalSize: number;
+  sizeMatched: number;
+  sizeRemaining: number;
+  status: string;
+  timestamp?: number;
+}
+
+export interface GroundTruthResult {
+  walletId: string;
+  mode: TradingMode;
+  timestamp: number;
+  balanceUSDC: number;
+  capitalAllocated: number;
+  positionsCount: number;
+  openOrdersCount: number;
+  tradesCount: number;
+  positions: Position[];
+  openOrders: OpenOrder[];
+  recentTrades: TradeRecord[];
+}
+

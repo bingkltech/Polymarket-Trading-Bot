@@ -145,11 +145,23 @@ interface PerfMetrics {
   parallelEfficiency: number;  // 0-1: actual vs theoretical throughput
 }
 
-/* ── TTL Cache for market metadata ── */
+/* ── TTL Cache for market metadata (Bounded Size & Auto-Pruning) ── */
 class MarketCache {
   private cache = new Map<string, { data: GammaMarket; expiresAt: number }>();
+  private readonly MAX_SIZE = 500;
 
   set(market: GammaMarket): void {
+    if (this.cache.size >= this.MAX_SIZE) {
+      this.prune();
+      if (this.cache.size >= this.MAX_SIZE) {
+        // Evict oldest 20% entries
+        const keys = Array.from(this.cache.keys());
+        const evictCount = Math.floor(this.MAX_SIZE * 0.2);
+        for (let i = 0; i < evictCount; i++) {
+          this.cache.delete(keys[i]);
+        }
+      }
+    }
     this.cache.set(market.id, { data: market, expiresAt: Date.now() + MARKET_CACHE_TTL_MS });
   }
 
@@ -174,6 +186,10 @@ class MarketCache {
     for (const [id, entry] of this.cache) {
       if (now > entry.expiresAt) this.cache.delete(id);
     }
+  }
+
+  clear(): void {
+    this.cache.clear();
   }
 }
 
@@ -704,8 +720,17 @@ export class WhaleScanner {
 
         this.state.marketsInCurrentBatch += newMarkets.length;
 
-        /* Mark all as scanned immediately to prevent duplicate processing */
-        for (const m of newMarkets) this.scannedMarketIds.add(m.id);
+        /* Mark all as scanned immediately to prevent duplicate processing (bounded to 1,000) */
+        for (const m of newMarkets) {
+          if (this.scannedMarketIds.size >= 1000) {
+            const iter = this.scannedMarketIds.values();
+            for (let i = 0; i < 200; i++) {
+              const val = iter.next().value;
+              if (val) this.scannedMarketIds.delete(val);
+            }
+          }
+          this.scannedMarketIds.add(m.id);
+        }
 
         /* Process markets in parallel using semaphore for concurrency control */
         const concurrency = this.scannerConfig.parallelFetchBatch || 8;
@@ -1067,9 +1092,18 @@ export class WhaleScanner {
     currentPrices?: Map<string, number>,
   ): void {
     for (const t of trades) {
-      /* ── Deduplicate trades by transaction hash ── */
-      if (t.id && this.seenTradeHashes.has(t.id)) continue;
-      if (t.id) this.seenTradeHashes.add(t.id);
+      /* ── Deduplicate trades by transaction hash (bounded to 5,000) ── */
+      if (t.id) {
+        if (this.seenTradeHashes.has(t.id)) continue;
+        if (this.seenTradeHashes.size >= 5000) {
+          const iter = this.seenTradeHashes.values();
+          for (let i = 0; i < 1000; i++) {
+            const val = iter.next().value;
+            if (val) this.seenTradeHashes.delete(val);
+          }
+        }
+        this.seenTradeHashes.add(t.id);
+      }
 
       const addresses = [t.owner];
       if (t.maker_address) addresses.push(t.maker_address);
@@ -2489,9 +2523,9 @@ export class WhaleScanner {
 
   /**
    * Prevents unbounded accumulators from exhausting the Node.js heap
-   * by pruning old trades and keeping map sizes below safety thresholds.
+   * by pruning old trades, bounding arrays, and keeping map sizes below strict safety thresholds.
    */
-  private pruneUnboundedState(): void {
+  public pruneUnboundedState(): void {
     const nowMs = Date.now();
     const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -2509,14 +2543,14 @@ export class WhaleScanner {
           continue;
         }
 
-        const MAX_TRADES = 2000;
+        const MAX_TRADES = 100; // Cap to 100 trades per market per address for bounded memory
         if (mAgg.buys.length > MAX_TRADES) mAgg.buys.splice(0, mAgg.buys.length - MAX_TRADES);
         if (mAgg.sells.length > MAX_TRADES) mAgg.sells.splice(0, mAgg.sells.length - MAX_TRADES);
       }
     }
 
-    // 3. Keep maximum number of addresses based on recency
-    const MAX_ADDRESSES = 20000;
+    // 3. Keep maximum number of addresses based on recency (capped to 1,000 top addresses)
+    const MAX_ADDRESSES = 1000;
     if (this.globalAgg.size > MAX_ADDRESSES) {
       const entries = Array.from(this.globalAgg.entries());
       entries.sort((a, b) => new Date(b[1].lastTradeTs).getTime() - new Date(a[1].lastTradeTs).getTime());
@@ -2527,8 +2561,10 @@ export class WhaleScanner {
       }
     }
 
-    // 4. Clear unneeded wallet balances & copy simulations cache
-    if (this.walletBalances.size > MAX_ADDRESSES) this.walletBalances.clear();
-    if (this.copySimResults.size > 5000) this.copySimResults.clear();
+    // 4. Bound secondary caches
+    if (this.walletBalances.size > 200) this.walletBalances.clear();
+    if (this.copySimResults.size > 200) this.copySimResults.clear();
+    if (this.latestProfiles.length > 300) this.latestProfiles = this.latestProfiles.slice(0, 300);
+    this.marketCache.prune();
   }
 }

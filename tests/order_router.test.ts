@@ -54,7 +54,7 @@ describe('OrderRouter', () => {
       outcome: 'YES',
       side: 'BUY',
       price: 0.5,
-      size: 10,
+      size: 5,
       strategy: 'momentum',
     };
 

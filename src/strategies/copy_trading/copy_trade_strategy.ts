@@ -275,6 +275,43 @@ export class CopyTradeStrategy extends BaseStrategy {
       return;
     }
 
+    // If no specific whale addresses provided, automatically poll top live Polymarket trades
+    if (this.cfg.whale_addresses.length === 0) {
+      try {
+        const res = await fetch(`${this.cfg.data_api_url}/trades?limit=50`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) {
+          const rawTrades: any[] = await res.json();
+          if (Array.isArray(rawTrades)) {
+            for (const item of rawTrades) {
+              const size = Number(item.size || 0);
+              const price = Number(item.price || 0);
+              const notional = size * price;
+              if (notional < 50 || notional > 50_000) continue;
+              if (price < 0.50 || price > 0.75) continue;
+              if (item.side !== 'BUY') continue;
+
+              const whaleAddr = item.proxyWallet || 'smart_trader';
+              const trade = this.normaliseTrade(item, whaleAddr);
+              if (this.seenTradeIds.has(trade.id)) continue;
+              this.seenTradeIds.add(trade.id);
+
+              if (!this.passesFilters(trade, now)) continue;
+
+              const signal = this.tradeToSignal(trade);
+              if (signal) {
+                this.pendingSignals.push(signal);
+                this.pendingWhaleTrades.push(trade);
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.debug({ err }, '[copy_trade] Failed to poll live smart trades');
+      }
+    }
+
     // Poll each whale address
     for (const address of this.cfg.whale_addresses) {
       const perf = this.whalePerf.get(address.toLowerCase());
@@ -335,6 +372,25 @@ export class CopyTradeStrategy extends BaseStrategy {
     return signals;
   }
 
+  /** Resolve market by ID, conditionId, slug, or tokenIds */
+  private resolveMarket(marketIdentifier: string): MarketData | undefined {
+    let m = this.markets.get(marketIdentifier);
+    if (!m) {
+      const target = marketIdentifier.toLowerCase();
+      for (const [, candidate] of this.markets) {
+        if (
+          (candidate.conditionId && candidate.conditionId.toLowerCase() === target) ||
+          (candidate.slug && candidate.slug.toLowerCase() === target) ||
+          (candidate.clobTokenIds && candidate.clobTokenIds.some((t: string) => t.toLowerCase() === target))
+        ) {
+          m = candidate;
+          break;
+        }
+      }
+    }
+    return m;
+  }
+
   /* ━━━━━━━━━━━━━━ Position Sizing ━━━━━━━━━━━━━━ */
 
   override sizePositions(signals: Signal[]): OrderRequest[] {
@@ -365,15 +421,21 @@ export class CopyTradeStrategy extends BaseStrategy {
       const signal = signals[i];
       const whaleTrade = whaleTrades[i];
 
-      // Already positioned in this market?
-      if (this.positions.has(signal.marketId)) continue;
-
-      const market = this.markets.get(signal.marketId);
+      const market = this.resolveMarket(signal.marketId);
       if (!market) continue;
+
+      // Single-Position Rule: NEVER buy into an already held market
+      if (this.isMarketPositionHeld(signal.marketId, market)) continue;
 
       // Market liquidity / volume filters
       if (market.liquidity < this.cfg.min_market_liquidity) continue;
       if (market.volume24h < this.cfg.min_market_volume_24h) continue;
+
+      // Exclude dynamic / high-fee crypto short-term markets (e.g. 15m, 1h, up-down)
+      const q = (market.question || '').toLowerCase();
+      const s = (market.slug || '').toLowerCase();
+      const isHighFeeCrypto = q.includes('15m') || q.includes('15 min') || q.includes('1 hour') || q.includes('up or down') || s.includes('updown') || s.includes('15m') || s.includes('1h');
+      if (isHighFeeCrypto) continue;
 
       // Per-market exposure check
       const existingExposure = this.getMarketExposure(signal.marketId);
@@ -383,12 +445,15 @@ export class CopyTradeStrategy extends BaseStrategy {
       const outcomePrice = signal.outcome === 'YES'
         ? market.outcomePrices[0]
         : (market.outcomePrices[1] ?? 1 - market.outcomePrices[0]);
-      const safePrice = Number(Math.max(0.02, Math.min(0.98, outcomePrice)).toFixed(4));
+      const safePrice = Number((Math.round(outcomePrice * 100) / 100).toFixed(2));
+      if (safePrice > 0.75 || safePrice < 0.01) continue; // Anti-steamroller ceiling
 
       // Calculate size based on mode
-      const size = this.calculateSize(signal, whaleTrade, safePrice, available);
+      let size = this.calculateSize(signal, whaleTrade, safePrice, available);
+      if (this.context?.wallet.mode === 'LIVE') {
+        size = Math.max(5, size);
+      }
       if (size < 1) continue;
-
       const cost = size * safePrice;
 
       // Daily volume cap
@@ -399,7 +464,7 @@ export class CopyTradeStrategy extends BaseStrategy {
 
       orders.push({
         walletId,
-        marketId: signal.marketId,
+        marketId: market.marketId,
         outcome: signal.outcome,
         side: signal.side,
         price: safePrice,
@@ -410,7 +475,7 @@ export class CopyTradeStrategy extends BaseStrategy {
       logger.info({
         strategy: this.name,
         whale: whaleTrade?.whaleAddress?.slice(0, 10) ?? 'unknown',
-        marketId: signal.marketId,
+        marketId: market.marketId,
         outcome: signal.outcome,
         side: signal.side,
         size,
@@ -423,21 +488,42 @@ export class CopyTradeStrategy extends BaseStrategy {
     return orders;
   }
 
+  /** Seed existing positions from live wallet/on-chain sync */
+  override seedPositions(positions: import('../../types').Position[]): void {
+    const valid = positions.filter((p) => p.size > 0);
+    const newMap = new Map<string, CopyPosition>();
+    for (const pos of valid) {
+      const existing = this.positions.get(pos.marketId);
+      newMap.set(pos.marketId, {
+        marketId: pos.marketId,
+        outcome: pos.outcome,
+        side: 'BUY',
+        entryPrice: pos.avgPrice,
+        entryTime: existing?.entryTime ?? Date.now(),
+        size: pos.size,
+        peakPnlBps: existing?.peakPnlBps ?? 0,
+        whaleAddress: existing?.whaleAddress ?? 'on_chain_holding',
+        whaleExited: existing?.whaleExited ?? false,
+      });
+    }
+    this.positions = newMap;
+  }
+
   /* ━━━━━━━━━━━━━━ Fill Tracking ━━━━━━━━━━━━━━ */
 
   override notifyFill(order: OrderRequest): void {
-    if (order.side !== 'BUY') return;
+    if (!order || order.side === 'SELL') return;
 
     // Find the whale address from the pending data
     const whaleAddr = this.findWhaleForMarket(order.marketId) ?? 'unknown';
 
     this.positions.set(order.marketId, {
       marketId: order.marketId,
-      outcome: order.outcome,
-      side: order.side,
-      entryPrice: order.price,
+      outcome: order.outcome ?? 'YES',
+      side: order.side ?? 'BUY',
+      entryPrice: order.price ?? 0.5,
       entryTime: Date.now(),
-      size: order.size,
+      size: order.size ?? 1,
       peakPnlBps: 0,
       whaleAddress: whaleAddr,
       whaleExited: false,
@@ -476,27 +562,34 @@ export class CopyTradeStrategy extends BaseStrategy {
 
       let exitReason: string | undefined;
 
-      // 1. Take profit
-      if (pnlBps >= this.cfg.take_profit_bps) {
+      // 1. Quant Tier 1: Pre-Resolution De-Risking (>= 92c Ceiling)
+      if (currentPrice >= 0.92) {
+        exitReason = `ALPHA_HARVEST_CEILING (>=92c)`;
+      }
+
+      // 2. Take profit
+      if (!exitReason && pnlBps >= this.cfg.take_profit_bps) {
         exitReason = `TP: +${pnlBps.toFixed(0)}bps`;
       }
-      // 2. Stop loss
-      else if (pnlBps <= -this.cfg.stop_loss_bps) {
+      // 3. Stop loss (only if not near winning territory)
+      else if (!exitReason && currentPrice < 0.90 && pnlBps <= -this.cfg.stop_loss_bps) {
         exitReason = `SL: ${pnlBps.toFixed(0)}bps`;
       }
-      // 3. Trailing stop
+      // 4. Trailing stop
       else if (
+        !exitReason &&
+        currentPrice < 0.95 &&
         pos.peakPnlBps >= this.cfg.trailing_stop_activate_bps &&
         pnlBps < pos.peakPnlBps - this.cfg.trailing_stop_distance_bps
       ) {
         exitReason = `TRAIL: peak +${pos.peakPnlBps.toFixed(0)}, now ${pnlBps.toFixed(0)}bps`;
       }
-      // 4. Time exit
-      else if (this.cfg.time_exit_minutes > 0 && holdMin >= this.cfg.time_exit_minutes) {
+      // 5. Time exit (only for non-winning markets)
+      else if (!exitReason && currentPrice < 0.90 && this.cfg.time_exit_minutes > 0 && holdMin >= this.cfg.time_exit_minutes) {
         exitReason = `TIME: ${holdMin.toFixed(0)}min`;
       }
-      // 5. Whale exited
-      else if (this.cfg.exit_on_whale_exit && pos.whaleExited) {
+      // 6. Whale exited
+      else if (!exitReason && this.cfg.exit_on_whale_exit && pos.whaleExited) {
         exitReason = `WHALE_EXIT: whale ${pos.whaleAddress.slice(0, 10)}… closed position`;
       }
 
@@ -574,6 +667,23 @@ export class CopyTradeStrategy extends BaseStrategy {
   /* ━━━━━━━━━━━━━━ Filters ━━━━━━━━━━━━━━ */
 
   private passesFilters(trade: NormalisedWhaleTrade, now: number): boolean {
+    // 0. Single-Position Check
+    const market = this.resolveMarket(trade.marketId);
+    if (this.isMarketPositionHeld(trade.marketId, market)) return false;
+
+    // 0b. 7-Day Resolution Horizon Check
+    if (market?.endDate) {
+      const daysLeft = (new Date(market.endDate).getTime() - now) / 86_400_000;
+      if (daysLeft <= 0 || daysLeft > 7) return false;
+    }
+
+    if (market?.outcomePrices && market.outcomePrices.length > 0) {
+      // Safe probability band (50% - 75%)
+      const yesPrice = market.outcomePrices[0] ?? 0.50;
+      const leadingProb = Math.max(yesPrice, 1 - yesPrice);
+      if (leadingProb < 0.50 || leadingProb > 0.75) return false;
+    }
+
     // Age filter
     const ageSeconds = (now - trade.timestamp) / 1000;
     if (ageSeconds > this.cfg.max_trade_age_seconds) return false;

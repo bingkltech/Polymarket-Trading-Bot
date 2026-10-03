@@ -485,9 +485,14 @@ export class AiForecastStrategy extends BaseStrategy {
 
       let exitReason: string | undefined;
 
-      // ── Partial profit: take 50% at +100 bps ──────────────
-      if (!pos.partialTaken && edgeBps >= 100) {
-        const partialSize = Math.floor(pos.originalSize * 0.5);
+      // ── Quant Tier 1: Pre-Resolution De-Risking (>= 92c Ceiling) ──
+      if (currentPrice >= 0.92) {
+        exitReason = 'ALPHA_HARVEST_CEILING (>=92c)';
+      }
+
+      // ── Partial profit: take 50% at +300 bps (only if partial size >= 5) ──
+      const partialSize = Math.floor(pos.originalSize * 0.5);
+      if (!exitReason && !pos.partialTaken && edgeBps >= 300 && partialSize >= 5 && pos.size > partialSize) {
         pos.size = pos.size - partialSize;
         pos.partialTaken = true;
 
@@ -504,16 +509,16 @@ export class AiForecastStrategy extends BaseStrategy {
         continue;
       }
 
-      // ── Trailing stop: activates at +60 bps, trails 40 bps ─
-      if (pos.peakBps > 60 && edgeBps < pos.peakBps - 40) {
+      // ── Trailing stop: activates at +200 bps (+2c), trails 80 bps ─
+      if (!exitReason && pos.peakBps >= 200 && edgeBps < pos.peakBps - 80) {
         exitReason = 'TRAILING_STOP';
       }
 
-      // ── Take profit: +150 bps ─────────────────────────────
-      if (!exitReason && edgeBps >= 150) { exitReason = 'TAKE_PROFIT'; }
+      // ── Take profit: +400 bps (+4c net gain) ───────────────────
+      if (!exitReason && edgeBps >= 400) { exitReason = 'TAKE_PROFIT'; }
 
-      // ── Stop-loss: -120 bps (wider in volatile regime) ─────
-      const stopBps = pos.regime === 'volatile' ? -150 : -120;
+      // ── Stop-loss: -800 bps (-8c from mid) ────────────────────
+      const stopBps = pos.regime === 'volatile' ? -1000 : -800;
       if (!exitReason && edgeBps <= stopBps) { exitReason = 'STOP_LOSS'; }
 
       // ── Time exit: regime-dependent ────────────────────────

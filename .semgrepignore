@@ -1,0 +1,21 @@
+# Dependency and build directories
+node_modules/
+dist/
+build/
+coverage/
+.runtime/
+.git/
+.vscode/
+.idea/
+
+# Environment and sensitive data
+.env
+.env.*
+*.log
+*.sqlite
+*.db
+*.db-wal
+*.db-shm
+
+# Test mock data and artifacts
+tests/__fixtures__/

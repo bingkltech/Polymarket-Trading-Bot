@@ -1,11 +1,12 @@
-import { WalletConfig, WalletState, Position, TradeRecord, RiskLimits } from '../types';
+import { WalletConfig, WalletState, Position, TradeRecord, RiskLimits, OpenOrder, GroundTruthResult } from '../types';
 import { FillSimulator } from '../paper_trading/fill_simulator';
 import { PnlTracker } from '../paper_trading/pnl_tracker';
 import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
 import { OrderbookStream } from '../data/orderbook_stream';
 import { ClobFetcher } from '../data/clob_fetcher';
-import { TradeMemoryBank } from '../learning/memory_bank';
+import { MarketPenaltyBox } from '../learning/penalty_box';
+import { analyzeLoss } from '../learning/loss_analysis';
 
 import * as fs from 'fs';
 import * as path from 'path';
@@ -18,6 +19,7 @@ export class PaperWallet {
   private readonly pnlTracker = new PnlTracker();
   private readonly trades: TradeRecord[] = [];
   private displayName: string = '';
+  private stream?: OrderbookStream;
 
     static loadPersistedState(walletId: string): any {
     try {
@@ -61,9 +63,9 @@ export class PaperWallet {
     stream?: OrderbookStream,
     clobFetcher?: ClobFetcher
   ) {
+    this.stream = stream;
     this.displayName = config.id;
     this.fillSimulator = new FillSimulator(stream, clobFetcher);
-    this.displayName = config.id;
     this.state = {
       walletId: config.id,
       mode: 'PAPER',
@@ -91,6 +93,7 @@ export class PaperWallet {
   }
 
   setDependencies(stream: OrderbookStream, clobFetcher: ClobFetcher): void {
+    this.stream = stream;
     // Re-instantiate the FillSimulator with real L2 data
     (this as any).fillSimulator = new FillSimulator(stream, clobFetcher);
     logger.info({ walletId: this.state.walletId }, 'PaperWallet dependencies injected — VWAP enabled');
@@ -135,6 +138,27 @@ export class PaperWallet {
     price: number;
     size: number;
   }): Promise<void> {
+    // Strict Single-Position Per Market Guardrail: NEVER buy if we already have an open position in this market
+    if (request.side === 'BUY') {
+      const market = this.stream?.getMarket(request.marketId);
+      const alreadyHeld = this.state.openPositions.some((p) => {
+        if (p.size <= 0) return false;
+        if (p.marketId === request.marketId) return true;
+        if (market) {
+          const target = p.marketId.toLowerCase();
+          if (market.marketId && market.marketId.toLowerCase() === target) return true;
+          if (market.conditionId && market.conditionId.toLowerCase() === target) return true;
+          if (market.slug && market.slug.toLowerCase() === target) return true;
+          if (market.clobTokenIds && market.clobTokenIds.some((t: string) => t.toLowerCase() === target)) return true;
+        }
+        return false;
+      });
+      if (alreadyHeld) {
+        logger.warn({ marketId: request.marketId }, 'Single-Position Veto: Paper wallet already holds a position in this market. Aborting BUY.');
+        return;
+      }
+    }
+
     const fill = await this.fillSimulator.simulate(request);
 
     // Capture entry price BEFORE applyFill mutates the position
@@ -152,20 +176,7 @@ export class PaperWallet {
       this.state.realizedPnl -= fill.gasFee; // Treat gas as realized loss
     }
 
-    const memoryBank = TradeMemoryBank.getInstance();
-
     if ((fill as any).rejected) {
-      memoryBank.logOrder({
-        orderId: fill.orderId,
-        marketId: fill.marketId,
-        strategy: this.state.assignedStrategy,
-        outcome: fill.outcome,
-        side: fill.side,
-        price: request.price,
-        size: request.size,
-        status: 'cancelled', // rejected
-        createdAt: new Date().toISOString()
-      });
       return; // Stop processing, no actual size was traded
     }
 
@@ -198,32 +209,29 @@ export class PaperWallet {
       timestamp: fill.timestamp,
     });
 
-    memoryBank.logOrder({
-      orderId: fill.orderId,
-      marketId: fill.marketId,
-      strategy: this.state.assignedStrategy,
-      outcome: fill.outcome,
-      side: fill.side,
-      price: request.price,
-      size: request.size,
-      status: 'filled',
-      createdAt: new Date(fill.timestamp).toISOString()
-    });
+    if (fill.side === 'SELL') {
+      const pnlCents = pnl.realized * 100;
+      let lossTag: any = null;
+      if (pnl.realized < 0) {
+        lossTag = analyzeLoss({
+          strategy: this.state.assignedStrategy,
+          marketId: fill.marketId,
+          outcome: fill.outcome,
+          entryPrice,
+          exitPrice: fill.price,
+          intendedExitPrice: request.price,
+          holdDurationMs: 60_000,
+          exitReason: 'SELL_EXIT',
+          pnlCents,
+        });
 
-    memoryBank.logFill({
-      fillId: `fill_${fill.orderId}_${Date.now()}`,
-      orderId: fill.orderId,
-      marketId: fill.marketId,
-      strategy: this.state.assignedStrategy,
-      outcome: fill.outcome,
-      side: fill.side,
-      intendedPrice: request.price,
-      actualPrice: fill.price,
-      size: fill.size,
-      slippageBps: Math.abs(fill.price - request.price) / request.price * 10000,
-      latencyMs: (fill as any).latencyMs ?? 0,
-      filledAt: new Date(fill.timestamp).toISOString()
-    });
+        MarketPenaltyBox.getInstance().penalize(
+          fill.marketId,
+          Math.abs(pnl.realized),
+          `Exit loss of -$${Math.abs(pnl.realized).toFixed(2)} [${lossTag}]`
+        );
+      }
+    }
 
     const MAX_TRADES = 1000;
     if (this.trades.length > MAX_TRADES) {
@@ -340,4 +348,33 @@ export class PaperWallet {
 
     return existing;
   }
+
+  getOpenOrders(): OpenOrder[] {
+    return [];
+  }
+
+  async cancelOrder(_orderId: string): Promise<boolean> {
+    return true;
+  }
+
+  async cancelAllOrders(): Promise<number> {
+    return 0;
+  }
+
+  async syncGroundTruth(): Promise<GroundTruthResult> {
+    return {
+      walletId: this.state.walletId,
+      mode: this.state.mode,
+      timestamp: Date.now(),
+      balanceUSDC: this.state.availableBalance,
+      capitalAllocated: this.state.capitalAllocated,
+      positionsCount: this.state.openPositions.length,
+      openOrdersCount: 0,
+      tradesCount: this.trades.length,
+      positions: [...this.state.openPositions],
+      openOrders: [],
+      recentTrades: this.trades.slice(-20),
+    };
+  }
 }
+

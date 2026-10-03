@@ -9,6 +9,7 @@ import { consoleLog } from './console_log';
 import type { WhaleAPI } from '../whales/whale_api';
 import type { Engine } from '../core/engine';
 import { CopyTradeStrategy } from '../strategies/copy_trading/copy_trade_strategy';
+import { getPocketCockpitHtml } from './pocket_cockpit_html';
 
 /* ──────────────────────────────────────────────────────────────
    Strategy catalog — rich metadata used by the Strategies tab
@@ -74,20 +75,39 @@ function buildWalletDetail(wallet: WalletState, trades: TradeRecord[], marketPri
   const sorted = [...trades].sort((a, b) => a.timestamp - b.timestamp);
 
   /* ── Basic stats ── */
-  const totalTrades = sorted.length;
   const buyTrades = sorted.filter((t) => t.side === 'BUY');
   const sellTrades = sorted.filter((t) => t.side === 'SELL');
-  const wins = sorted.filter((t) => t.realizedPnl > 0);
-  const losses = sorted.filter((t) => t.realizedPnl < 0);
-  const closedTrades = wins.length + losses.length;
-  const winRate = closedTrades > 0 ? wins.length / closedTrades : 0;
-  const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + t.realizedPnl, 0) / wins.length : 0;
-  const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + t.realizedPnl, 0) / losses.length : 0;
-  const profitFactor = losses.length > 0 && avgLoss !== 0
-    ? Math.abs(wins.reduce((s, t) => s + t.realizedPnl, 0) / losses.reduce((s, t) => s + t.realizedPnl, 0))
-    : wins.length > 0 ? Infinity : 0;
-  const largestWin = wins.length > 0 ? Math.max(...wins.map((t) => t.realizedPnl)) : 0;
-  const largestLoss = losses.length > 0 ? Math.min(...losses.map((t) => t.realizedPnl)) : 0;
+  const closedTradesList = sorted.filter((t) => t.side === 'SELL' || t.realizedPnl !== 0);
+  const totalTrades = closedTradesList.length > 0 ? closedTradesList.length : sorted.length;
+  const closedWins = closedTradesList.filter((t) => t.realizedPnl > 0);
+  const closedLosses = closedTradesList.filter((t) => t.realizedPnl < 0);
+  const closedTrades = closedTradesList.length;
+
+  // Calculate mark-to-market active open positions
+  const openPositionsMetrics = wallet.openPositions.filter((p) => p.size > 0).map((p) => {
+    const cp = marketPrices?.get(p.marketId) ?? p.avgPrice;
+    const uPnl = p.size > 0 && p.avgPrice > 0 ? (cp - p.avgPrice) * p.size : 0;
+    return { ...p, uPnl };
+  });
+  const openWins = openPositionsMetrics.filter((p) => p.uPnl > 0).length;
+  const openLosses = openPositionsMetrics.filter((p) => p.uPnl < 0).length;
+
+  const totalEvaluated = closedWins.length + closedLosses.length + openWins + openLosses;
+  const totalWinning = closedWins.length + openWins;
+  const winRate = totalEvaluated > 0 
+    ? totalWinning / totalEvaluated 
+    : (closedTradesList.length > 0 ? closedWins.length / closedTradesList.length : 0);
+
+  const avgWin = closedWins.length > 0 ? closedWins.reduce((s, t) => s + t.realizedPnl, 0) / closedWins.length : 0;
+  const avgLoss = closedLosses.length > 0 ? closedLosses.reduce((s, t) => s + t.realizedPnl, 0) / closedLosses.length : 0;
+
+  const totalWalletPnl = wallet.realizedPnl + openPositionsMetrics.reduce((s, p) => s + p.uPnl, 0);
+
+  const profitFactor = closedLosses.length > 0 && avgLoss !== 0
+    ? Math.abs(closedWins.reduce((s, t) => s + t.realizedPnl, 0) / closedLosses.reduce((s, t) => s + t.realizedPnl, 0))
+    : closedWins.length > 0 && totalWalletPnl > 0 ? Infinity : 0;
+  const largestWin = closedWins.length > 0 ? Math.max(...closedWins.map((t) => t.realizedPnl)) : 0;
+  const largestLoss = closedLosses.length > 0 ? Math.min(...closedLosses.map((t) => t.realizedPnl)) : 0;
 
   /* ── Cumulative PnL timeline ── */
   let cumPnl = 0;
@@ -696,7 +716,10 @@ export class DashboardServer {
   constructor(
     private readonly walletManager: WalletManager,
     private readonly port = 3000,
-  ) { }
+    engine?: Engine,
+  ) {
+    if (engine) this.engine = engine;
+  }
 
   setWhaleApi(api: WhaleAPI): void {
     this.whaleApi = api;
@@ -803,6 +826,148 @@ export class DashboardServer {
       return;
     }
 
+    if (path === '/widget' || path === '/pocket-cockpit') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(getPocketCockpitHtml());
+      return;
+    }
+
+    /* ─── JSON: Bot Armed / Disarmed status ─── */
+    if (path === '/api/bot/status' && method === 'GET') {
+      const isArmed = this.engine ? this.engine.getIsArmed() : true;
+      json(res, 200, {
+        ok: true,
+        isArmed,
+        uptime: process.uptime(),
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    /* ─── JSON: Arm Bot ─── */
+    if (path === '/api/bot/arm' && method === 'POST') {
+      if (this.engine) {
+        this.engine.arm();
+      }
+      json(res, 200, { ok: true, isArmed: true, message: 'Bot armed successfully' });
+      return;
+    }
+
+    /* ─── JSON: Disarm Bot ─── */
+    if (path === '/api/bot/disarm' && method === 'POST') {
+      if (this.engine) {
+        this.engine.disarm();
+      }
+      json(res, 200, { ok: true, isArmed: false, message: 'Bot disarmed into standby mode' });
+      return;
+    }
+
+    /* ─── JSON: Emergency Panic Halt ─── */
+    if (path === '/api/bot/panic' && method === 'POST') {
+      try {
+        const result = this.engine
+          ? await this.engine.panicHalt()
+          : { cancelledOrders: await this.walletManager.cancelAllOrders() };
+        json(res, 200, {
+          ok: true,
+          isArmed: false,
+          cancelledOrders: result.cancelledOrders,
+          message: 'Emergency Panic: Bot disarmed and all open orders cancelled',
+        });
+      } catch (err: any) {
+        logger.error({ err }, 'Error executing panic halt');
+        json(res, 500, { ok: false, error: err?.message || String(err) });
+      }
+      return;
+    }
+
+    /* ─── JSON: Cancel Single Order ─── */
+    if (path === '/api/orders/cancel' && method === 'POST') {
+      try {
+        const body = await readBody(req);
+        const orderId = String(body.orderId ?? '').trim();
+        const walletId = body.walletId ? String(body.walletId).trim() : undefined;
+        if (!orderId) {
+          json(res, 400, { ok: false, error: 'orderId is required' });
+          return;
+        }
+        let cancelled = false;
+        if (walletId) {
+          cancelled = await this.walletManager.cancelOrder(walletId, orderId);
+        } else {
+          for (const w of this.walletManager.listWallets()) {
+            if (await this.walletManager.cancelOrder(w.walletId, orderId)) {
+              cancelled = true;
+              break;
+            }
+          }
+        }
+        json(res, 200, { ok: cancelled, orderId });
+      } catch (err: any) {
+        json(res, 500, { ok: false, error: err?.message || String(err) });
+      }
+      return;
+    }
+
+    /* ─── JSON: Cancel All Open Orders ─── */
+    if (path === '/api/orders/cancel-all' && method === 'POST') {
+      try {
+        const total = await this.walletManager.cancelAllOrders();
+        json(res, 200, { ok: true, cancelledCount: total });
+      } catch (err: any) {
+        json(res, 500, { ok: false, error: err?.message || String(err) });
+      }
+      return;
+    }
+
+    /* ─── JSON: 1-Click Alpha Harvest / Position Exit ─── */
+    if (path === '/api/positions/exit' && method === 'POST') {
+      try {
+        const body = await readBody(req);
+        const marketId = String(body.marketId ?? '').trim();
+        const outcome = (String(body.outcome ?? 'YES').toUpperCase()) as 'YES' | 'NO';
+        const price = typeof body.price === 'number' ? body.price : 0.94;
+        const size = typeof body.size === 'number' ? body.size : undefined;
+        const walletId = body.walletId ? String(body.walletId).trim() : undefined;
+
+        if (!marketId) {
+          json(res, 400, { ok: false, error: 'marketId is required' });
+          return;
+        }
+
+        const liveWallets = this.walletManager.listWallets().filter((w) => w.mode === 'LIVE');
+        const targetWalletId = walletId || (liveWallets.length > 0 ? liveWallets[0].walletId : 'paper-1');
+        const wallet = this.walletManager.getWallet(targetWalletId);
+        if (!wallet) {
+          json(res, 404, { ok: false, error: `Wallet ${targetWalletId} not found` });
+          return;
+        }
+
+        const existingPos = wallet.getState().openPositions.find(
+          (p) => p.marketId === marketId && p.outcome === outcome
+        );
+        const exitSize = size ?? existingPos?.size ?? 5;
+        const exitPrice = price;
+
+        await wallet.placeOrder({
+          marketId,
+          outcome,
+          side: 'SELL',
+          price: exitPrice,
+          size: exitSize,
+        });
+
+        json(res, 200, {
+          ok: true,
+          message: `Placed exit SELL for ${exitSize} shares at $${exitPrice.toFixed(2)}`,
+        });
+      } catch (err: any) {
+        logger.error({ err }, 'Error placing position exit order');
+        json(res, 500, { ok: false, error: err?.message || String(err) });
+      }
+      return;
+    }
+
     /* ─── JSON: overview data (used by Dashboard tab) ─── */
     if (path === '/api/data' && method === 'GET') {
       json(res, 200, buildDashboardPayload(
@@ -812,6 +977,42 @@ export class DashboardServer {
         this.engine?.getPausedWallets(),
         this.walletDisplayNames,
       ));
+      return;
+    }
+
+    /* ─── JSON: Ground Truth Sync (Polymarket on-chain balances, positions, orders, fills) ─── */
+    if (path === '/api/sync/truth' && method === 'POST') {
+      try {
+        const results = this.engine
+          ? await this.engine.syncAllGroundTruth()
+          : await this.walletManager.syncAllGroundTruth();
+        json(res, 200, { ok: true, timestamp: Date.now(), results });
+      } catch (err: any) {
+        logger.error({ err }, 'Error handling ground truth sync request');
+        json(res, 500, { ok: false, error: err?.message || String(err) });
+      }
+      return;
+    }
+
+    /* ─── JSON: Live Resting Open Orders across wallets ─── */
+    if (path === '/api/orders/open' && method === 'GET') {
+      try {
+        const openOrdersMap = this.walletManager.getAllOpenOrders();
+        const allOrders: any[] = [];
+        const seenOrderIds = new Set<string>();
+        for (const [walletId, orders] of openOrdersMap) {
+          for (const ord of orders) {
+            if (!seenOrderIds.has(ord.id)) {
+              seenOrderIds.add(ord.id);
+              allOrders.push({ walletId, ...ord });
+            }
+          }
+        }
+        json(res, 200, { ok: true, count: allOrders.length, orders: allOrders });
+      } catch (err: any) {
+        logger.error({ err }, 'Error fetching open orders');
+        json(res, 500, { ok: false, error: err?.message || String(err) });
+      }
       return;
     }
 
@@ -1353,9 +1554,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .tab-btn{background:transparent;border:none;color:var(--muted);padding:18px 20px;font-size:13px;font-weight:600;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s;letter-spacing:.3px}
 .tab-btn:hover{color:var(--text)}
 .tab-btn.active{color:var(--accent);border-bottom-color:var(--accent)}
-.header-right{margin-left:auto;display:flex;align-items:center;gap:14px}
+.header-right{margin-left:auto;display:flex;align-items:center;gap:12px}
 .pulse{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse-anim 2s ease-in-out infinite}
 @keyframes pulse-anim{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes spin-anim{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
+.spin-anim{animation:spin-anim .9s linear infinite;display:inline-block}
+.btn-sync{background:rgba(79,143,247,.12);color:var(--accent);border:1px solid rgba(79,143,247,.3);border-radius:6px;padding:6px 12px;font-size:12px;font-weight:700;display:flex;align-items:center;gap:6px;cursor:pointer;transition:all .2s}
+.btn-sync:hover{background:rgba(79,143,247,.22);border-color:var(--accent)}
 .header-ts{font-size:11px;color:var(--muted)}
 
 /* ═══ Main container ═══ */
@@ -1734,7 +1939,15 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
     <button class="tab-btn" data-tab="console">📟 Console</button>
   </div>
   <div class="header-right">
-    <span class="pulse"></span>
+    <button class="btn-sync" id="btn-arm-toggle" onclick="toggleBotArmFromHeader()" style="border-color:rgba(16,185,129,0.4);background:rgba(16,185,129,0.12);color:var(--green);cursor:pointer" title="Toggle Bot Armed / Disarmed State">
+      <span id="arm-dot" class="pulse"></span> <span id="arm-text">ARMED</span>
+    </button>
+    <button class="btn-sync" onclick="window.open('/widget','PolymarketWidget','width=520,height=760,menubar=no,toolbar=no')" title="Open Floating Pocket Cockpit / Widget" style="border-color:rgba(56,189,248,0.4);background:rgba(56,189,248,0.12);color:var(--accent);cursor:pointer">
+      <span>🗗</span> <span>Pocket Cockpit</span>
+    </button>
+    <button class="btn-sync" id="btn-sync-truth" onclick="syncPolymarketTruth()" title="Reconcile balances, positions, resting orders & trade history directly with Polymarket on-chain/CLOB">
+      <span id="sync-icon">🔄</span> <span id="sync-text">Sync Truth</span>
+    </button>
     <span class="header-ts" id="hdr-ts">Loading\u2026</span>
   </div>
 </div>
@@ -1746,7 +1959,26 @@ footer{text-align:center;padding:24px;color:var(--muted);font-size:11px;border-t
 <div class="tab-pane active" id="pane-dashboard">
   <div class="summary-row" id="summary"></div>
   <div class="wallet-grid" id="wallets"></div>
+
+  <!-- ── Live Open Orders (CLOB) ── -->
+  <div style="margin-top:28px">
+    <div class="section-title" style="font-size:16px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center">
+      <div><span class="icon">📋</span> Live Resting Orders (Polymarket CLOB) <span id="open-orders-count" style="font-size:12px;color:var(--muted);font-weight:400;margin-left:6px">(0 active)</span></div>
+      <button class="btn btn-sm" onclick="loadOpenOrders()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);font-size:11px;padding:4px 10px;border-radius:4px;cursor:pointer">Refresh Orders</button>
+    </div>
+    <div class="wallet-table" id="open-orders-table">
+      <table>
+        <thead><tr>
+          <th>Wallet</th><th>Order ID</th><th>Market / Token</th><th>Side</th><th>Outcome</th><th>Price</th><th>Size Rem.</th><th>Filled</th><th>Status</th>
+        </tr></thead>
+        <tbody id="open-orders-body">
+          <tr><td colspan="9" class="empty">No resting open orders on Polymarket CLOB.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
+
 
 <!-- ═════════════ TAB 2: WALLETS ═════════════ -->
 <div class="tab-pane" id="pane-wallets">
@@ -2389,14 +2621,20 @@ function renderSummary(d){
   const rPnl = d.totalRealizedPnl || d.totalPnl || 0;
   const uPnl = d.totalUnrealizedPnl || 0;
   const tPnl = d.totalPnl || 0;
+  const cash = d.polymarketCash !== undefined ? d.polymarketCash : (d.totalBalance || 0);
+  const engaged = d.engagedCapital !== undefined ? d.engagedCapital : 0;
+  const portfolio = d.portfolioValue !== undefined ? d.portfolioValue : (cash + uPnl);
+  const budget = d.totalBudget !== undefined ? d.totalBudget : (d.totalCapital || 0);
+
   $('#summary').innerHTML=
-    '<div class="s-card"><div class="label">Active Wallets</div><div class="value">'+d.activeWallets+'</div></div>'+
-    '<div class="s-card"><div class="label">Total Capital</div><div class="value">$'+fmt(d.totalCapital,0)+'</div></div>'+
-      '<div class="s-card"><div class="label">Total Balance</div><div class="value">$'+fmt(d.totalBalance,2)+'</div></div>'+
+    '<div class="s-card"><div class="label">Polymarket Cash (Free)</div><div class="value" style="color:var(--green)">$'+fmt(cash,2)+'</div></div>'+
+    '<div class="s-card"><div class="label">Engaged Capital</div><div class="value">$'+fmt(engaged,2)+'</div></div>'+
+    '<div class="s-card"><div class="label">Total Portfolio Value</div><div class="value" style="color:var(--accent)">$'+fmt(portfolio,2)+'</div></div>'+
+    '<div class="s-card"><div class="label">Strategy Budget</div><div class="value">$'+fmt(budget,0)+'</div></div>'+
     '<div class="s-card"><div class="label">Realized PnL</div><div class="value '+pnlCls(rPnl)+'">$'+fmt(rPnl)+'</div></div>'+
     '<div class="s-card"><div class="label">Unrealized PnL</div><div class="value '+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</div></div>'+
     '<div class="s-card"><div class="label">Total PnL</div><div class="value '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+
-    '<div class="s-card"><div class="label">Engine Status</div><div class="value" style="font-size:16px;color:var(--green)">RUNNING</div></div>';
+    '<div class="s-card"><div class="label">Active Wallets</div><div class="value">'+d.activeWallets+'</div></div>';
 }
 
 function renderWallets(wl){
@@ -2436,12 +2674,14 @@ function renderWallets(wl){
 
     return '<div class="w-card" style="cursor:pointer" onclick="openWalletDetail(\\''+w.walletId+'\\')" title="Click for detailed analytics">'+
       '<div class="w-hdr"><div class="w-left"><span class="w-id">'+dName+'</span><span class="w-strat">'+w.strategy+'</span></div><div style="display:flex;align-items:center;gap:8px"><button class="toggle-btn '+toggleCls+'" onclick="event.stopPropagation();toggleWallet(\\''+w.walletId+'\\','+isPaused+')" title="'+(isPaused?'Start':'Pause')+' this wallet"><span class="toggle-dot"></span>'+toggleLabel+'</button><span class="badge badge-'+w.mode+'">'+w.mode+'</span></div></div>'+
-      '<div class="w-body"><div class="m-row">'+
-      '<div class="m-cell"><div class="m-label">Capital</div><div class="m-val">$'+fmt(w.capitalAllocated,0)+'</div></div>'+
-      '<div class="m-cell"><div class="m-label">Available</div><div class="m-val">$'+fmt(w.availableBalance,0)+'</div></div>'+
+      '<div class="w-body"><div class="m-row" style="grid-template-columns:repeat(5,1fr)">'+
+      '<div class="m-cell"><div class="m-label">Cash</div><div class="m-val" style="color:var(--green)">$'+fmt(w.availableBalance,2)+'</div></div>'+
+      '<div class="m-cell"><div class="m-label">Engaged</div><div class="m-val">$'+fmt(w.engagedCapital||0,2)+'</div></div>'+
+      '<div class="m-cell"><div class="m-label">Portfolio</div><div class="m-val" style="color:var(--accent)">$'+fmt(w.portfolioValue||(w.availableBalance+uPnl),2)+'</div></div>'+
+      '<div class="m-cell"><div class="m-label">Budget</div><div class="m-val">$'+fmt(w.capitalAllocated,0)+'</div></div>'+
+      '<div class="m-cell"><div class="m-label">Total PnL</div><div class="m-val '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Realized</div><div class="m-val '+pnlCls(p.realizedPnl)+'">$'+fmt(p.realizedPnl)+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Unrealized</div><div class="m-val '+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</div></div>'+
-      '<div class="m-cell"><div class="m-label">Total PnL</div><div class="m-val '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Win Rate</div><div class="m-val">'+(p.totalTrades>0?pct(p.winRate):'N/A')+'</div></div>'+
       '<div class="m-cell"><div class="m-label">Trades</div><div class="m-val">'+p.totalTrades+' <span style="font-size:10px;color:var(--muted)">('+p.winCount+'W/'+p.lossCount+'L)</span></div></div>'+
       '<div class="m-cell"><div class="m-label">Profit Factor</div><div class="m-val">'+(p.profitFactor>=999?'\u221E':fmt(p.profitFactor,1))+'</div></div></div>'+
@@ -2454,6 +2694,7 @@ function renderWallets(wl){
       '</div></div>';
   }).join('');
 }
+
 
 /* ─── Toggle wallet start/stop ─── */
 async function toggleWallet(walletId, isPaused){
@@ -4493,6 +4734,132 @@ document.querySelectorAll('.con-sub-tab').forEach(btn=>{
   setInterval(fetchTrades,2000);
 })();
 
+/* ─── Ground Truth Synchronization & Open Orders ─── */
+let isSyncingTruth = false;
+
+async function syncPolymarketTruth() {
+  if (isSyncingTruth) return;
+  isSyncingTruth = true;
+
+  const btn = document.getElementById('btn-sync-truth');
+  const icon = document.getElementById('sync-icon');
+  const text = document.getElementById('sync-text');
+
+  if (btn) btn.style.opacity = '0.7';
+  if (icon) icon.classList.add('spin-anim');
+  if (text) text.textContent = 'Syncing...';
+
+  try {
+    const res = await fetch('/api/sync/truth', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      if (text) text.textContent = 'Synced!';
+      await fetchDashboardData();
+      await loadOpenOrders();
+      await refresh();
+      setTimeout(() => { if (text) text.textContent = 'Sync Truth'; }, 2500);
+    } else {
+      if (text) text.textContent = 'Sync Failed';
+      setTimeout(() => { if (text) text.textContent = 'Sync Truth'; }, 2500);
+    }
+  } catch (err) {
+    console.error('Ground truth sync error:', err);
+    if (text) text.textContent = 'Sync Error';
+    setTimeout(() => { if (text) text.textContent = 'Sync Truth'; }, 2500);
+  } finally {
+    isSyncingTruth = false;
+    if (btn) btn.style.opacity = '1';
+    if (icon) icon.classList.remove('spin-anim');
+  }
+}
+
+let isHeaderArmed = true;
+async function fetchHeaderBotStatus() {
+  try {
+    const res = await fetch('/api/bot/status');
+    const d = await res.json();
+    if (d && d.ok) {
+      isHeaderArmed = Boolean(d.isArmed);
+      updateHeaderArmUI(isHeaderArmed);
+    }
+  } catch(e) {}
+}
+
+function updateHeaderArmUI(armed) {
+  const btn = document.getElementById('btn-arm-toggle');
+  const text = document.getElementById('arm-text');
+  const dot = document.getElementById('arm-dot');
+  if (!btn || !text || !dot) return;
+  if (armed) {
+    btn.style.borderColor = 'rgba(16,185,129,0.4)';
+    btn.style.background = 'rgba(16,185,129,0.12)';
+    btn.style.color = 'var(--green)';
+    text.textContent = 'ARMED';
+    dot.style.background = 'var(--green)';
+  } else {
+    btn.style.borderColor = 'rgba(245,158,11,0.4)';
+    btn.style.background = 'rgba(245,158,11,0.12)';
+    btn.style.color = 'var(--yellow)';
+    text.textContent = 'DISARMED';
+    dot.style.background = 'var(--yellow)';
+  }
+}
+
+async function toggleBotArmFromHeader() {
+  const nextArmed = !isHeaderArmed;
+  isHeaderArmed = nextArmed;
+  updateHeaderArmUI(nextArmed);
+  try {
+    if (nextArmed) {
+      await fetch('/api/bot/arm', { method: 'POST' });
+    } else {
+      await fetch('/api/bot/disarm', { method: 'POST' });
+    }
+  } catch(e) {
+    console.error('Failed to toggle bot arm status', e);
+  }
+}
+
+async function loadOpenOrders() {
+  try {
+    const res = await fetch('/api/orders/open');
+    if (!res.ok) return;
+    const data = await res.json();
+    const orders = data.orders || [];
+    const countEl = document.getElementById('open-orders-count');
+    const tbody = document.getElementById('open-orders-body');
+
+    if (countEl) countEl.textContent = '(' + orders.length + ' active)';
+    if (!tbody) return;
+
+    if (orders.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" class="empty">No resting open orders on Polymarket CLOB.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = orders.map(o => {
+      const sideCls = o.side === 'BUY' ? 'side-buy' : 'side-sell';
+      const sideBadge = o.side === 'BUY' ? 'tl-badge tl-badge-buy' : 'tl-badge tl-badge-sell';
+      const orderIdShort = o.id.length > 16 ? o.id.slice(0, 8) + '…' + o.id.slice(-6) : o.id;
+      const mktShort = o.marketId.length > 20 ? o.marketId.slice(0, 10) + '…' + o.marketId.slice(-8) : o.marketId;
+
+      return '<tr>' +
+        '<td><span class="tl-wallet-tag">' + (o.walletId || 'live') + '</span></td>' +
+        '<td style="font-family:monospace;font-size:11px" title="' + o.id + '">' + orderIdShort + '</td>' +
+        '<td style="font-size:11px" title="' + o.marketId + '">' + mktShort + '</td>' +
+        '<td><span class="' + sideBadge + '">' + o.side + '</span></td>' +
+        '<td class="o-' + o.outcome + '">' + o.outcome + '</td>' +
+        '<td>$' + Number(o.price).toFixed(2) + '</td>' +
+        '<td>' + Number(o.sizeRemaining || 0).toFixed(1) + '</td>' +
+        '<td>' + Number(o.sizeMatched || 0).toFixed(1) + '</td>' +
+        '<td><span class="badge badge-PAPER" style="background:rgba(79,143,247,0.12);color:var(--accent)">' + o.status + '</span></td>' +
+        '</tr>';
+    }).join('');
+  } catch (e) {
+    console.error('loadOpenOrders error:', e);
+  }
+}
+
 /* ─── Fetch dashboard data via REST (fallback + initial load) ─── */
 async function fetchDashboardData(){
   try{
@@ -4502,6 +4869,7 @@ async function fetchDashboardData(){
     $('#hdr-ts').textContent = new Date(d.generatedAt).toLocaleString();
     renderSummary(d);
     renderWallets(d.wallets);
+    loadOpenOrders();
   }catch(e){console.error('fetchDashboardData error',e)}
 }
 
@@ -4542,6 +4910,8 @@ async function refresh(){
     renderWalletTable(walletList);
     populateAnalyticsDropdown();
     if(strategies.length) renderStrategies(strategies, walletList);
+    loadOpenOrders();
+    fetchHeaderBotStatus();
     /* If SSE is not connected, poll /api/data as fallback */
     if(!sseConnected) await fetchDashboardData();
   }catch(e){$('#hdr-ts').textContent='Error \u2014 retrying\u2026'}
@@ -4549,11 +4919,14 @@ async function refresh(){
 
 /* ─── Boot ─── */
 fetchDashboardData();
+fetchHeaderBotStatus();
 populateStrategyDropdown().then(()=>refresh());
+loadOpenOrders();
 connectSSE();
 setInterval(refresh, 5000);
 </script>
 </body>
 </html>`;
 }
+
 

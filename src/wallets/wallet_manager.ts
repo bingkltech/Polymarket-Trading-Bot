@@ -26,7 +26,7 @@ function markWalletDeleted(walletId: string) {
 }
 
 import { PolymarketWallet } from './polymarket_wallet';
-import { WalletState, WalletConfig, TradeRecord } from '../types';
+import { WalletState, WalletConfig, TradeRecord, Position, OpenOrder, GroundTruthResult } from '../types';
 import { logger } from '../reporting/logs';
 
 import { OrderbookStream } from '../data/orderbook_stream';
@@ -35,6 +35,12 @@ import { ClobFetcher } from '../data/clob_fetcher';
 export interface ExecutionWallet {
   getState(): WalletState;
   getTradeHistory(): TradeRecord[];
+  getOpenOrders?(): OpenOrder[];
+  syncGroundTruth?(): Promise<GroundTruthResult>;
+  syncLivePositions?(): Promise<Position[]>;
+  syncLiveBalance?(): Promise<number>;
+  syncLiveOpenOrders?(): Promise<OpenOrder[]>;
+  syncLiveTradeHistory?(): Promise<TradeRecord[]>;
   placeOrder(request: {
     marketId: string;
     outcome: 'YES' | 'NO';
@@ -42,6 +48,8 @@ export interface ExecutionWallet {
     price: number;
     size: number;
   }): Promise<void>;
+  cancelOrder?(orderId: string): Promise<boolean>;
+  cancelAllOrders?(): Promise<number>;
   updateBalance(delta: number): void;
   /** Optional display name for the dashboard (defaults to walletId) */
   getDisplayName?(): string;
@@ -141,15 +149,158 @@ export class WalletManager {
     this.wallets.set(walletId, wallet);
   }
 
-  addWallet(wallet: ExecutionWallet): void {
-    const state = wallet.getState();
-    if (this.wallets.has(state.walletId)) {
-      throw new Error(`Wallet ${state.walletId} already registered`);
+  getAllOpenOrders(): Map<string, OpenOrder[]> {
+    const map = new Map<string, OpenOrder[]>();
+    for (const [id, wallet] of this.wallets) {
+      if (typeof wallet.getOpenOrders === 'function') {
+        map.set(id, wallet.getOpenOrders());
+      } else {
+        map.set(id, []);
+      }
     }
-    this.wallets.set(state.walletId, wallet);
-    logger.info(
-      { walletId: state.walletId, mode: state.mode, strategy: state.assignedStrategy, capital: state.capitalAllocated },
-      `Wallet ${state.walletId} added at runtime (${state.mode}) strategy=${state.assignedStrategy}`,
+    return map;
+  }
+
+  async cancelOrder(walletId: string, orderId: string): Promise<boolean> {
+    const wallet = this.wallets.get(walletId);
+    if (wallet && typeof wallet.cancelOrder === 'function') {
+      return await wallet.cancelOrder(orderId);
+    }
+    return false;
+  }
+
+  async cancelAllOrders(): Promise<number> {
+    let totalCancelled = 0;
+    for (const wallet of this.wallets.values()) {
+      if (typeof wallet.cancelAllOrders === 'function') {
+        try {
+          const count = await wallet.cancelAllOrders();
+          totalCancelled += count;
+        } catch (err) {
+          logger.error({ err, walletId: wallet.getState().walletId }, 'Error in cancelAllOrders for wallet');
+        }
+      }
+    }
+    return totalCancelled;
+  }
+
+  async syncAllGroundTruth(): Promise<GroundTruthResult[]> {
+    const liveWallets = Array.from(this.wallets.values()).filter(
+      (w) => w.getState().mode === 'LIVE'
     );
+
+    // If multiple live sub-wallets share the same Polymarket account, coordinate their positions & orders
+    if (liveWallets.length > 0) {
+      const primaryLive = liveWallets[0];
+      if (typeof primaryLive.syncGroundTruth === 'function') {
+        try {
+          await primaryLive.syncGroundTruth();
+        } catch (err) {
+          logger.error({ err }, 'Error syncing primary live wallet ground truth');
+        }
+      }
+
+      const allLivePositions = primaryLive.getState().openPositions;
+      const allOpenOrders = typeof primaryLive.getOpenOrders === 'function' ? primaryLive.getOpenOrders() : [];
+
+      // Partition positions and open orders among live wallets
+      const assignedPositions = new Map<string, Position[]>();
+      const assignedOrders = new Map<string, OpenOrder[]>();
+      for (const w of liveWallets) {
+        assignedPositions.set(w.getState().walletId, []);
+        assignedOrders.set(w.getState().walletId, []);
+      }
+
+      // Partition positions by matching trade history
+      for (const pos of allLivePositions) {
+        let ownerWalletId: string | null = null;
+        for (const w of liveWallets) {
+          const trades = w.getTradeHistory();
+          if (trades.some((t) => t.marketId === pos.marketId)) {
+            ownerWalletId = w.getState().walletId;
+            break;
+          }
+        }
+        // Unassigned/manual external positions belong exclusively to the primary live wallet
+        const targetId = ownerWalletId || primaryLive.getState().walletId;
+        assignedPositions.get(targetId)?.push(pos);
+      }
+
+      // Partition open resting orders by matching trade/market
+      for (const ord of allOpenOrders) {
+        let ownerWalletId: string | null = null;
+        for (const w of liveWallets) {
+          const trades = w.getTradeHistory();
+          if (trades.some((t) => t.marketId === ord.marketId)) {
+            ownerWalletId = w.getState().walletId;
+            break;
+          }
+        }
+        const targetId = ownerWalletId || primaryLive.getState().walletId;
+        assignedOrders.get(targetId)?.push(ord);
+      }
+
+      // Partition trade history among live wallets
+      const allTrades = primaryLive.getTradeHistory();
+      const assignedTrades = new Map<string, TradeRecord[]>();
+      for (const w of liveWallets) {
+        assignedTrades.set(w.getState().walletId, []);
+      }
+      for (const trade of allTrades) {
+        let targetId = trade.walletId;
+        if (!assignedTrades.has(targetId)) {
+          targetId = primaryLive.getState().walletId;
+        }
+        assignedTrades.get(targetId)?.push(trade);
+      }
+
+      // Apply cleanly partitioned state to each live wallet
+      for (const w of liveWallets) {
+        const wId = w.getState().walletId;
+        const myPositions = assignedPositions.get(wId) ?? [];
+        const myOrders = assignedOrders.get(wId) ?? [];
+        const myTrades = assignedTrades.get(wId) ?? [];
+
+        if ('state' in w) {
+          (w as any).state.openPositions = myPositions;
+        }
+        if ('openOrders' in w) {
+          (w as any).openOrders = myOrders;
+        }
+        if ('trades' in w && Array.isArray((w as any).trades)) {
+          (w as any).trades.length = 0;
+          (w as any).trades.push(...myTrades);
+        }
+      }
+    }
+
+    // Now collect clean GroundTruthResult for each wallet
+    const results: GroundTruthResult[] = [];
+    for (const wallet of this.wallets.values()) {
+      if (typeof wallet.syncGroundTruth === 'function') {
+        try {
+          const state = wallet.getState();
+          const openOrders = typeof wallet.getOpenOrders === 'function' ? wallet.getOpenOrders() : [];
+          const trades = wallet.getTradeHistory();
+          results.push({
+            walletId: state.walletId,
+            mode: state.mode,
+            timestamp: Date.now(),
+            balanceUSDC: state.availableBalance,
+            capitalAllocated: state.capitalAllocated,
+            positionsCount: state.openPositions.length,
+            openOrdersCount: openOrders.length,
+            tradesCount: trades.length,
+            positions: [...state.openPositions],
+            openOrders: [...openOrders],
+            recentTrades: trades.slice(-20),
+          });
+        } catch (err) {
+          logger.error({ err, walletId: wallet.getState().walletId }, 'Error collecting ground truth for wallet');
+        }
+      }
+    }
+    return results;
   }
 }
+

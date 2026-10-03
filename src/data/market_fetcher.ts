@@ -4,6 +4,7 @@ import { logger } from '../reporting/logs';
 /** Raw shape returned by the Gamma API */
 interface GammaMarket {
   id: string;
+  conditionId?: string;
   question: string;
   slug: string;
   outcomes: string;          // JSON string e.g. '["Yes","No"]'
@@ -36,15 +37,15 @@ export class MarketFetcher {
   /** Page size for Gamma API pagination */
   private static readonly PAGE_SIZE = 100;
 
-  constructor(gammaApi = 'https://gamma-api.polymarket.com', limit = 0) {
+  constructor(gammaApi = 'https://gamma-api.polymarket.com', limit = 1500) {
     this.gammaApi = gammaApi;
     this.limit = limit;
   }
 
   /**
    * Fetch active, open Polymarket markets sorted by volume.
-   * Paginates through the Gamma API to collect all qualifying
-   * markets (or up to `limit` if set).
+   * Paginates through the Gamma API to collect top qualifying
+   * markets (top 1500 by default).
    */
   async fetchSnapshot(): Promise<MarketData[]> {
     try {
@@ -58,42 +59,61 @@ export class MarketFetcher {
     }
   }
 
-  /* ── Paginated fetcher ── */
+  /* ── Paginated fetcher with parallel batching ── */
 
   private async fetchAllPages(): Promise<GammaMarket[]> {
     const all: GammaMarket[] = [];
-    let offset = 0;
+    const targetLimit = this.limit > 0 ? this.limit : 1500;
     const pageSize = MarketFetcher.PAGE_SIZE;
+    const totalPages = Math.ceil(targetLimit / pageSize);
+    const concurrency = 5; // 5 pages fetched in parallel per wave
 
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const url = `${this.gammaApi}/markets?active=true&closed=false&limit=${pageSize}&offset=${offset}&order=volume24hr&ascending=false`;
-      const response = await fetch(url);
+    for (let i = 0; i < totalPages; i += concurrency) {
+      const pageIndices: number[] = [];
+      for (let j = i; j < Math.min(i + concurrency, totalPages); j++) {
+        pageIndices.push(j);
+      }
 
-      if (!response.ok) {
-        if (response.status !== 422) {
-          logger.error({ status: response.status, offset }, 'Gamma API page request failed');
+      const batchPromises = pageIndices.map(async (idx) => {
+        const offset = idx * pageSize;
+        const fetchSize = Math.min(targetLimit - offset, pageSize);
+        const url = `${this.gammaApi}/markets?active=true&closed=false&limit=${fetchSize}&offset=${offset}&order=volume24hr&ascending=false`;
+        try {
+          const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+          if (!response.ok) {
+            if (response.status !== 422) {
+              logger.warn({ status: response.status, offset }, 'Gamma API page request failed');
+            }
+            return { idx, page: [] as GammaMarket[] };
+          }
+          const page = (await response.json()) as GammaMarket[];
+          return { idx, page };
+        } catch (err: any) {
+          logger.warn({ offset, err: err?.message || err }, 'Gamma API fetch error');
+          return { idx, page: [] as GammaMarket[] };
         }
-        break;
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+      batchResults.sort((a, b) => a.idx - b.idx);
+
+      let ended = false;
+      for (const res of batchResults) {
+        if (!res.page || res.page.length === 0) {
+          ended = true;
+          break;
+        }
+        all.push(...res.page);
+        if (res.page.length < pageSize) {
+          ended = true;
+          break;
+        }
       }
 
-      const page: GammaMarket[] = await response.json() as GammaMarket[];
-      if (page.length === 0) break;
-
-      all.push(...page);
-
-      // Stop early if we've hit the caller-requested limit
-      if (this.limit > 0 && all.length >= this.limit) {
-        return all.slice(0, this.limit);
-      }
-
-      // Last page was under-full → no more data
-      if (page.length < pageSize) break;
-
-      offset += pageSize;
+      if (ended || all.length >= targetLimit) break;
     }
 
-    return all;
+    return all.slice(0, targetLimit);
   }
 
   /* ── Parse raw Gamma response into MarketData ── */
@@ -131,6 +151,7 @@ export class MarketFetcher {
 
         markets.push({
           marketId: m.id,
+          conditionId: m.conditionId,
           question: m.question,
           slug: m.slug,
           outcomes,

@@ -1,5 +1,7 @@
 import { BaseStrategy } from '../strategy_interface';
 import { Signal, MarketData, OrderRequest } from '../../types';
+import { MarketPenaltyBox } from '../../learning/penalty_box';
+import { logger } from '../../reporting/logs';
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Mispricing Arbitrage Strategy – Combat Hardened
@@ -69,15 +71,63 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
     this.volumeHistory.set(data.marketId, vols);
   }
 
+  /**
+   * Synchronise active market universe: prune stale price snapshots and volume history.
+   */
+  override syncActiveMarkets(activeMarkets: MarketData[]): void {
+    super.syncActiveMarkets(activeMarkets);
+    const activeIds = new Set(activeMarkets.map((m) => m.marketId));
+
+    for (const id of this.priceSnapshots.keys()) {
+      if (!activeIds.has(id)) {
+        this.priceSnapshots.delete(id);
+      }
+    }
+
+    for (const id of this.volumeHistory.keys()) {
+      if (!activeIds.has(id)) {
+        this.volumeHistory.delete(id);
+      }
+    }
+  }
+
+  /**
+   * Check whether a market is already held in tracked positions or the wallet
+   * across any identifier (marketId, conditionId, slug, or clobTokenIds).
+   */
+  protected override isMarketPositionHeld(marketId: string, market?: MarketData): boolean {
+    const m = market ?? this.markets.get(marketId);
+    const checkPos = (posMarketId: string, size: number) => {
+      if (size <= 0) return false;
+      if (posMarketId === marketId) return true;
+      if (m) {
+        const target = posMarketId.toLowerCase();
+        if (m.marketId && m.marketId.toLowerCase() === target) return true;
+        if (m.conditionId && m.conditionId.toLowerCase() === target) return true;
+        if (m.slug && m.slug.toLowerCase() === target) return true;
+        if (m.clobTokenIds && m.clobTokenIds.some((t) => t.toLowerCase() === target)) return true;
+      }
+      return false;
+    };
+
+    const heldInManaged = this.positions.some((p) => checkPos(p.marketId, p.size));
+    const heldInWallet = (this.context?.wallet.openPositions ?? []).some((p) => checkPos(p.marketId, p.size));
+    return heldInManaged || heldInWallet;
+  }
+
   /* ── Signal generation ──────────────────────────────────────── */
   generateSignals(): Signal[] {
     const signals: Signal[] = [];
-    if (this.positions.length >= MAX_POSITIONS) return signals;
+    const available = this.context?.wallet.availableBalance ?? 0;
+    if (available < 2.00 || this.positions.length >= MAX_POSITIONS) return signals;
 
     const now = Date.now();
     const eventGroups = this.groupByEvent();
 
     for (const [marketId, market] of this.markets) {
+      // Single-Position Rule: NEVER buy into a market where a position already exists
+      if (this.isMarketPositionHeld(marketId, market)) continue;
+
       if (!this.passesFilters(market, now)) continue;
 
       const score = this.computeMispricingScore(marketId, market, eventGroups);
@@ -129,7 +179,12 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
       // Net Edge Calculation: deduct estimated exchange fees (100 bps / ~1.0% round-trip)
       const roundTripFee = 0.01;
       const netEdge = edge - roundTripFee;
-      if (netEdge <= 0.01) continue; // Require at least 1c net edge after fees
+
+      // 1. Minimum Edge Gate: Require at least 2c net edge after fees
+      if (netEdge < 0.02) continue;
+
+      // 2. Spread-to-Edge Gate: Edge must be at least 2.0x the market spread
+      if (edge < 2.0 * Math.max(0.01, market.spread)) continue;
 
       const confidence = Math.min(MAX_CONFIDENCE, score.total * 1.1);
 
@@ -142,8 +197,16 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
       });
     }
 
-    // Sort by expected edge value
-    signals.sort((a, b) => b.confidence * b.edge - a.confidence * a.edge);
+    // Sort by expected edge value weighted by market liquidity
+    signals.sort((a, b) => {
+      const mktA = this.markets.get(a.marketId);
+      const mktB = this.markets.get(b.marketId);
+      const liqA = mktA ? mktA.liquidity : 1000;
+      const liqB = mktB ? mktB.liquidity : 1000;
+      const rankA = a.confidence * a.edge * (1 + Math.log10(Math.max(1000, liqA)));
+      const rankB = b.confidence * b.edge * (1 + Math.log10(Math.max(1000, liqB)));
+      return rankB - rankA;
+    });
     return signals.slice(0, MAX_POSITIONS - this.positions.length);
   }
 
@@ -156,6 +219,10 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
 
     return signals
       .filter((s) => {
+        const market = this.markets.get(s.marketId);
+        // Single-Position Rule: NEVER buy into a market where a position already exists
+        if (this.isMarketPositionHeld(s.marketId, market)) return false;
+
         const key = `${s.marketId}:${s.outcome}:${s.side}`;
         const last = (this as any).tradeCooldowns?.get(key) ?? 0;
         return now - last > this.cooldownMs;
@@ -172,15 +239,14 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
         }
 
         const safePrice = Number((Math.round(price * 100) / 100).toFixed(2));
-        const boundedPrice = Math.max(0.01, Math.min(0.99, safePrice));
-
-        // Enforce strictly 1 to 2 shares max per trade, satisfying $1.00 min notional
-        const minShares = Math.ceil(1.00 / boundedPrice);
-        let size = Math.min(2, Math.max(1, minShares));
-        if (size * boundedPrice < 1.00) {
-          size = Math.min(2, Math.ceil(1.00 / boundedPrice));
+        const boundedPrice = Math.max(0.01, Math.min(0.75, safePrice));
+        if (boundedPrice > 0.75) {
+          return null as any;
         }
-        if (size * boundedPrice < 1.00 || size > 2) {
+
+        // Enforce strictly 5 shares (Polymarket CLOB minimum allowable order size)
+        const size = 5;
+        if (size * boundedPrice > capital) {
           return null as any;
         }
 
@@ -212,6 +278,24 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
     });
   }
 
+  /** Seed existing positions from live wallet/on-chain sync */
+  override seedPositions(positions: import('../../types').Position[]): void {
+    const valid = positions.filter((p) => p.size > 0);
+    this.positions = valid.map((pos) => {
+      const existing = this.positions.find((p) => p.marketId === pos.marketId && p.outcome === pos.outcome);
+      return {
+        marketId: pos.marketId,
+        outcome: pos.outcome,
+        side: 'BUY',
+        entryPrice: pos.avgPrice,
+        size: pos.size,
+        entryTime: existing?.entryTime ?? Date.now(),
+        mispricingScore: existing?.mispricingScore ?? 0,
+        peakBps: existing?.peakBps ?? 0,
+      };
+    });
+  }
+
   override submitOrders(_orders: OrderRequest[]): void {
     return;
   }
@@ -222,52 +306,93 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
 
     for (let i = 0; i < this.positions.length; i++) {
       const pos = this.positions[i];
-      const market = this.markets.get(pos.marketId);
+      let market = this.markets.get(pos.marketId);
+      if (!market) {
+        const target = pos.marketId.toLowerCase();
+        for (const [, m] of this.markets) {
+          if (
+            (m.conditionId && m.conditionId.toLowerCase() === target) ||
+            (m.slug && m.slug.toLowerCase() === target) ||
+            (m.clobTokenIds && m.clobTokenIds.some((t) => t.toLowerCase() === target))
+          ) {
+            market = m;
+            break;
+          }
+        }
+      }
       if (!market) continue;
 
-      // Sell YES at YES bid, Sell NO at NO bid
+      // True fair market price (mid-point) and execution prices
+      const currentFairPrice = pos.outcome === 'YES'
+        ? (market.midPrice ?? market.outcomePrices[0] ?? 0.5)
+        : (1 - (market.midPrice ?? market.outcomePrices[0] ?? 0.5));
+
       const currentBid = pos.outcome === 'YES'
-        ? (market.bid ?? market.outcomePrices[0])
-        : (1 - (market.ask ?? (1 - market.outcomePrices[1])));
+        ? (market.bid > 0 ? market.bid : currentFairPrice - 0.01)
+        : (1 - (market.ask > 0 ? market.ask : (1 - currentFairPrice + 0.01)));
 
-      const grossEdgeBps = pos.side === 'BUY'
+      const currentAsk = pos.outcome === 'YES'
+        ? (market.ask > 0 ? market.ask : currentFairPrice + 0.01)
+        : (1 - (market.bid > 0 ? market.bid : (1 - currentFairPrice - 0.01)));
+
+      // Realizable edge at current resting bid (for take-profit)
+      const bidEdgeBps = pos.side === 'BUY'
         ? (currentBid - pos.entryPrice) * 10_000
-        : (pos.entryPrice - currentBid) * 10_000;
+        : (pos.entryPrice - currentAsk) * 10_000;
 
-      // Deduct estimated 100 bps (1%) round-trip exchange fees from net profit tracking
-      const roundTripFeeBps = 100;
-      const netEdgeBps = grossEdgeBps - roundTripFeeBps;
+      // Fair-value edge (for stop-loss, to immunize against wide bid-ask spread traps)
+      const fairEdgeBps = pos.side === 'BUY'
+        ? (currentFairPrice - pos.entryPrice) * 10_000
+        : (pos.entryPrice - currentFairPrice) * 10_000;
 
-      pos.peakBps = Math.max(pos.peakBps, netEdgeBps);
+      pos.peakBps = Math.max(pos.peakBps, bidEdgeBps);
       const holdingMin = (Date.now() - pos.entryTime) / 60_000;
+      const holdingHours = holdingMin / 60;
 
       let exitReason: string | undefined;
+      let targetExitPrice = currentBid;
 
-      // 1. Take profit: +150 bps net profit (+1.5c net after all fees)
-      if (netEdgeBps >= 150) { 
-        exitReason = 'TAKE_PROFIT'; 
+      // 1. Quant Tier 1: Pre-Resolution De-Risking (>= 92c Ceiling)
+      // Bank 90%+ of max theoretical payout, eliminate 19:1 tail risk and avoid UMA settlement lockup
+      if (currentFairPrice >= 0.92 || currentBid >= 0.92) {
+        exitReason = 'ALPHA_HARVEST_CEILING (>=92c)';
+        targetExitPrice = Math.min(0.96, Math.max(currentBid, 0.93));
       }
 
-      // 2. Trailing stop: locked in 100+ bps net profit, dropped 40 from peak
-      if (!exitReason && pos.peakBps >= 100 && netEdgeBps < pos.peakBps - 40) {
-        exitReason = 'TRAILING_STOP';
+      // 2. Quant Tier 2: Target Alpha Harvest Take-Profit (+300 bps / +3c net gain)
+      if (!exitReason && bidEdgeBps >= 300) { 
+        exitReason = 'TAKE_PROFIT (+3c Alpha)'; 
+        targetExitPrice = Math.max(currentBid, pos.entryPrice + 0.03);
       }
 
-      // 3. Stop-loss: adverse move of -250 bps after at least 1 min holding
-      if (!exitReason && netEdgeBps <= -250 && holdingMin >= 1.0) { 
-        exitReason = 'STOP_LOSS'; 
+      // 3. Quant Tier 3: Trailing Stop (Locked in +150 bps, dropped 50 bps from peak)
+      if (!exitReason && pos.peakBps >= 150 && bidEdgeBps < pos.peakBps - 50) {
+        exitReason = 'TRAILING_STOP_PROFIT_LOCK';
+        targetExitPrice = currentBid;
       }
 
-      // 4. Time exit: close after 20 minutes
-      if (!exitReason && holdingMin >= 20.0) { 
-        exitReason = 'TIME_EXIT'; 
+      // 4. Quant Tier 4: Fair-Value Midpoint Stop-Loss (-1000 bps / -10c from mid)
+      // Evaluated against currentFairPrice (midpoint) to immunize against wide bid-ask spread traps
+      if (!exitReason && fairEdgeBps <= -1000 && holdingMin >= 3.0) { 
+        exitReason = 'STOP_LOSS (Fair Price Collapse)'; 
+        targetExitPrice = currentBid;
+      }
+
+      // 5. Quant Tier 5: Stale Holding Time Exit (24h limit or expired market)
+      // Free capital rapidly so it can compound into the next active opportunity
+      if (!exitReason) {
+        const isPastResolution = market.endDate ? new Date(market.endDate).getTime() < Date.now() : false;
+        if (isPastResolution || holdingHours >= 24.0) {
+          exitReason = isPastResolution ? 'MARKET_EXPIRED_TIME_EXIT' : 'STALE_HOLDING_TIME_EXIT (24h)';
+          targetExitPrice = currentBid;
+        }
       }
 
       if (exitReason) {
         toRemove.push(i);
 
         const exitSide: 'BUY' | 'SELL' = pos.side === 'BUY' ? 'SELL' : 'BUY';
-        const exitPrice = Number((Math.round(currentBid * 100) / 100).toFixed(2));
+        const exitPrice = Number((Math.round(targetExitPrice * 100) / 100).toFixed(2));
 
         this.pendingExits.push({
           walletId: this.context?.wallet.walletId ?? 'unknown',
@@ -278,6 +403,20 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
           size: pos.size,
           strategy: this.name,
         });
+
+        logger.info(
+          {
+            strategy: this.name,
+            marketId: pos.marketId,
+            outcome: pos.outcome,
+            reason: exitReason,
+            entryPrice: pos.entryPrice,
+            exitPrice,
+            fairPrice: currentFairPrice,
+            holdingMin: holdingMin.toFixed(1),
+          },
+          `Mispricing exit triggered: ${exitReason}`
+        );
       }
     }
 
@@ -393,15 +532,45 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
   }
 
   private passesFilters(market: MarketData, now: number): boolean {
+    // 0. Penalty Box check: Skip quarantined assets
+    if (MarketPenaltyBox.getInstance().isPenalized(market.marketId).penalized) return false;
+
     if (market.volume24h < MIN_VOLUME) return false;
     if (market.liquidity < MIN_LIQUIDITY) return false;
     if (now - market.timestamp > STALE_MS) return false;
 
+    // Spread tightness check: Exclude wide spread markets (>4.0% of mid price)
+    const spreadPct = market.spread / Math.max(market.midPrice, 0.01);
+    if (spreadPct > 0.04) return false;
+
     const yesPrice = market.outcomePrices[0] ?? 0.5;
     const leadingProb = Math.max(yesPrice, 1 - yesPrice);
     
-    // Strictly High-Probability: Only bet when leading probability is 75% - 96%
-    if (leadingProb < 0.75 || leadingProb > 0.96) return false;
+    // Price Band Gating: High-Confidence Value (0.35 - 0.75) or Deep Asymmetric Value (<= 0.25)
+    // Strictly blocks entries > 0.75 to eliminate negative EV 94c steamroller traps
+    const isValueMispricing = leadingProb >= 0.35 && leadingProb <= 0.75;
+    const isDeepValue = leadingProb <= 0.25;
+    if (!isValueMispricing && !isDeepValue) return false;
+
+    const q = (market.question || '').toLowerCase();
+    const s = (market.slug || '').toLowerCase();
+
+    // Exclude dynamic / high-fee crypto short-term markets (e.g. 15m, 1h, up-down)
+    const isHighFeeCrypto = q.includes('15m') || q.includes('15 min') || q.includes('1 hour') || q.includes('up or down') || s.includes('updown') || s.includes('15m') || s.includes('1h');
+    if (isHighFeeCrypto) return false;
+
+    // Exclude negative-EV sports props (Over/Unders, First TD, Player Props)
+    const isSportsProp = q.includes('o/u ') || q.includes('over/under') || q.includes('total-') || q.includes('totals-') || q.includes('first td') || q.includes('player props') || s.includes('totals') || s.includes('player-props');
+    if (isSportsProp) return false;
+
+    // Exclude illiquid multi-month political nominations
+    const isIlliquidPolitics = q.includes('mayoral') || q.includes('prime minister') || q.includes('presidential election') || q.includes('called by');
+    if (isIlliquidPolitics) return false;
+
+    // 7-Day Resolution Horizon Gate: Exclude events resolving further than 7 days out
+    if (!market.endDate) return false;
+    const daysLeft = (new Date(market.endDate).getTime() - now) / 86_400_000;
+    if (daysLeft <= 0 || daysLeft > 7) return false;
 
     // Reject markets experiencing violent 5c price spikes (adverse selection)
     if (this.isAdverseSpike(market.marketId)) return false;

@@ -13,16 +13,16 @@ function mkMarket(overrides: Partial<MarketData> = {}): MarketData {
     question: 'Will X happen?',
     slug: 'will-x-happen',
     outcomes: ['Yes', 'No'],
-    outcomePrices: [0.75, 0.25],
+    outcomePrices: [0.65, 0.35],
     clobTokenIds: ['tok-1', 'tok-2'],
-    midPrice: 0.75,
-    bid: 0.74,
-    ask: 0.76,
-    spread: 0.02,
+    midPrice: 0.65,
+    bid: 0.645,
+    ask: 0.655,
+    spread: 0.01,
     volume24h: 50_000,
     liquidity: 25_000,
     timestamp: Date.now(),
-    endDate: new Date(Date.now() + 7 * 86_400_000).toISOString(), // 7 days
+    endDate: new Date(Date.now() + 2 * 86_400_000).toISOString(), // 2 days
     eventId: 'evt-1',
     eventSlug: 'event-x',
     seriesSlug: undefined,
@@ -59,7 +59,7 @@ const baseConfig: Partial<ConvergenceConfig> = {
   min_prob: 0.65,
   max_prob: 0.96,
   max_spread_bps: 400, // generous for tests
-  max_days_to_resolution: 14,
+  max_days_to_resolution: 7,
   spike_pct: 0.08,
   spike_lookback_minutes: 60,
   min_depth_usd_within_1pct: 200,
@@ -83,10 +83,13 @@ const baseConfig: Partial<ConvergenceConfig> = {
   max_cancel_rate: 0.8,
 };
 
-function createStrategy(cfgOverrides: Partial<ConvergenceConfig> = {}): FilteredHighProbConvergenceStrategy {
+function createStrategy(
+  cfgOverrides: Partial<ConvergenceConfig> = {},
+  walletOverrides: Partial<WalletState> = {},
+): FilteredHighProbConvergenceStrategy {
   const strategy = new FilteredHighProbConvergenceStrategy();
   strategy.initialize({
-    wallet: mkWallet(),
+    wallet: mkWallet(walletOverrides),
     config: { ...baseConfig, ...cfgOverrides } as Record<string, unknown>,
   });
   return strategy;
@@ -167,9 +170,9 @@ describe('FilteredHighProbConvergence — Filter Logic', () => {
     expect(signals.length).toBe(0);
   });
 
-  it('rejects market too far from resolution', () => {
+  it('rejects market too far from resolution (> 7 days)', () => {
     const market = mkMarket({
-      endDate: new Date(Date.now() + 30 * 86_400_000).toISOString(), // 30 days
+      endDate: new Date(Date.now() + 8 * 86_400_000).toISOString(), // 8 days (> 7 days)
     });
     strategy.onMarketUpdate(market);
     const signals = strategy.generateSignals();
@@ -517,15 +520,15 @@ describe('FilteredHighProbConvergence — Entry Price', () => {
     const market = mkMarket({ bid: 0.74, ask: 0.76 });
     strategy.onMarketUpdate(market);
     for (let i = 0; i < 5; i++) {
-      strategy.onMarketUpdate(mkMarket({ bid: 0.74, ask: 0.76, timestamp: Date.now() - (5 - i) * 60_000 }));
+      strategy.onMarketUpdate(mkMarket({ bid: 0.645, ask: 0.655, midPrice: 0.65, timestamp: Date.now() - (5 - i) * 60_000 }));
     }
     const signals = strategy.generateSignals();
     if (signals.length > 0) {
       const orders = strategy.sizePositions(signals);
       if (orders.length > 0) {
         // Passive entry should be near bid, not crossing the ask
-        expect(orders[0].price).toBeLessThanOrEqual(0.76);
-        expect(orders[0].price).toBeGreaterThanOrEqual(0.74);
+        expect(orders[0].price).toBeLessThanOrEqual(0.66);
+        expect(orders[0].price).toBeGreaterThanOrEqual(0.64);
       }
     }
   });
@@ -620,5 +623,34 @@ describe('FilteredHighProbConvergence — Multi-Market Scanning', () => {
     expect(passedIds).not.toContain('low-liq');
     expect(passedIds).not.toContain('too-high');
     expect(passedIds).not.toContain('no-date');
+  });
+
+  it('strictly blocks market if held by conditionId, slug, or clobTokenId in wallet openPositions', () => {
+    // 1. ConditionId match
+    const walletWithCond = mkWallet({
+      openPositions: [{ marketId: '0xcondition123', outcome: 'YES', size: 10, avgPrice: 0.60, realizedPnl: 0 }],
+    });
+    const strat1 = createStrategy({}, walletWithCond);
+    const mktWithCond = mkMarket({ marketId: 'mkt-99', conditionId: '0xcondition123' });
+    strat1.onMarketUpdate(mktWithCond);
+    expect(strat1.generateSignals().length).toBe(0);
+
+    // 2. Token ID match
+    const walletWithToken = mkWallet({
+      openPositions: [{ marketId: 'tok-xyz', outcome: 'YES', size: 5, avgPrice: 0.65, realizedPnl: 0 }],
+    });
+    const strat2 = createStrategy({}, walletWithToken);
+    const mktWithToken = mkMarket({ marketId: 'mkt-100', clobTokenIds: ['tok-xyz', 'tok-abc'] });
+    strat2.onMarketUpdate(mktWithToken);
+    expect(strat2.generateSignals().length).toBe(0);
+
+    // 3. Slug match
+    const walletWithSlug = mkWallet({
+      openPositions: [{ marketId: 'bolsonaro-2026', outcome: 'YES', size: 5, avgPrice: 0.70, realizedPnl: 0 }],
+    });
+    const strat3 = createStrategy({}, walletWithSlug);
+    const mktWithSlug = mkMarket({ marketId: '601826', slug: 'bolsonaro-2026' });
+    strat3.onMarketUpdate(mktWithSlug);
+    expect(strat3.generateSignals().length).toBe(0);
   });
 });

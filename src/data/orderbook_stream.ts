@@ -17,9 +17,9 @@ export class OrderbookStream extends EventEmitter {
   private pollCount = 0;
   private isPolling = false;
 
-  constructor(gammaApi?: string, pollMs = 15_000) {
+  constructor(gammaApi?: string, pollMs = 15_000, limit = 1500) {
     super();
-    this.fetcher = new MarketFetcher(gammaApi);
+    this.fetcher = new MarketFetcher(gammaApi, limit);
     this.pollMs = pollMs;
   }
 
@@ -54,12 +54,14 @@ export class OrderbookStream extends EventEmitter {
     if (this.isPolling) return;
     this.isPolling = true;
     try {
-      const markets = await this.fetcher.fetchSnapshot();
       const prevSize = this.cache.size;
+      const markets = await this.fetcher.fetchSnapshot();
+      this.cache.clear();
       for (const m of markets) {
         this.cache.set(m.marketId, m);
         this.emit('update', m);
       }
+      this.emit('snapshot', markets);
       this.pollCount++;
       const newMarkets = this.cache.size - prevSize;
       consoleLog.info('SCAN', `Poll #${this.pollCount} complete — ${markets.length} markets fetched, ${this.cache.size} cached${newMarkets > 0 ? `, ${newMarkets} new` : ''}`, {

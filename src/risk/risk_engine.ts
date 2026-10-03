@@ -1,6 +1,7 @@
-﻿import { OrderRequest, WalletState } from '../types';
+import { OrderRequest, WalletState } from '../types';
 import { KillSwitch } from './kill_switch';
 import { consoleLog } from '../reporting/console_log';
+import { MarketPenaltyBox } from '../learning/penalty_box';
 
 export class RiskEngine {
   private readonly killSwitch: KillSwitch;
@@ -28,6 +29,30 @@ export class RiskEngine {
 
     /* ── BUY-Specific Risk Guardrails (Never block SELL / Exit orders) ── */
     if (order.side === 'BUY') {
+      // 0. Asset Penalty Box Veto: Never re-enter an asset that delivered negative profit
+      const penalty = MarketPenaltyBox.getInstance().isPenalized(order.marketId);
+      if (penalty.penalized) {
+        return { ok: false, reason: `Asset Penalty Box: Market quarantined (${penalty.reason})` };
+      }
+
+      // Single-Position Per Market Veto: NEVER buy into a market if we already hold an active position
+      const hasExistingPosition = wallet.openPositions.some(
+        (p) => p.marketId === order.marketId && p.size > 0
+      );
+      if (hasExistingPosition) {
+        return { ok: false, reason: `Single-Position Rule: Wallet already has an open position in market ${order.marketId}` };
+      }
+
+      // Single-Transaction / Fixed-Size Rule: Strictly max 5 shares per trade
+      if (order.size > 5) {
+        return { ok: false, reason: `Size Rule Veto: Order size ${order.size} exceeds maximum 5 shares` };
+      }
+
+      // 1. Anti-Steamroller Guardrail: Prohibit buying contracts above 75¢ (no 76¢-99¢ asymmetric risk/reward traps)
+      if (order.price > 0.75) {
+        return { ok: false, reason: `Anti-Steamroller Guardrail: Price $${order.price.toFixed(2)} exceeds 75¢ entry ceiling (EV protection)` };
+      }
+
       const orderCost = order.price * order.size;
       if (orderCost > wallet.availableBalance) {
         return { ok: false, reason: `Insufficient balance: need $${orderCost.toFixed(2)}, have $${wallet.availableBalance.toFixed(2)}` };
@@ -46,12 +71,17 @@ export class RiskEngine {
         return { ok: false, reason: 'Max daily loss breached' };
       }
 
-      // 1. Dust Limit Quarantine (Polymarket requires orders >= $0.10)
-      if (orderCost < 0.10 && wallet.mode === 'LIVE') {
+      // 2. Minimum Notional Check ($1.00 for Polymarket CLOB in Live mode)
+      if (wallet.mode === 'LIVE' && orderCost < 1.00) {
+        return { ok: false, reason: `Polymarket Min Notional Veto: Order cost $${orderCost.toFixed(2)} < $1.00 minimum` };
+      }
+
+      // 3. Dust Limit Quarantine (Polymarket requires orders >= $0.10)
+      if (orderCost < 0.10 && wallet.mode === 'PAPER') {
         return { ok: false, reason: 'Dust Limit Veto: Order size under $0.10 threshold' };
       }
 
-      // 2. Double-Bet / In-Flight Veto (Avoid overlapping resting limit orders)
+      // 4. Double-Bet / In-Flight Veto (Avoid overlapping resting limit orders)
       const hasDuplicateOpen = ((wallet as any).openOrders || []).some(
         (o: any) => o.marketId === order.marketId && o.outcome === order.outcome && o.side === order.side
       );

@@ -24,11 +24,43 @@ export class WhaleDB {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
+    this.db.pragma('synchronous = NORMAL');
+    this.db.pragma('cache_size = -8000'); // 8MB memory cache
+    this.db.pragma('temp_store = MEMORY');
+    this.db.pragma('mmap_size = 33554432'); // 32MB max memory mapped I/O
+    this.db.pragma('wal_autocheckpoint = 1000');
     this.migrate();
-    logger.info({ dbPath }, 'WhaleDB initialised');
+    logger.info({ dbPath }, 'WhaleDB initialised with bounded memory cache');
   }
 
   close(): void { this.db.close(); }
+
+  /**
+   * Prunes historical trades, alerts, signals, and unapproved candidates older than daysToKeep.
+   * Prevents SQLite database growth and memory footprint creep.
+   */
+  pruneOldData(daysToKeep = 7): { deletedTrades: number; deletedAlerts: number; deletedSignals: number; deletedCandidates: number } {
+    const cutoff = new Date(Date.now() - daysToKeep * 86_400_000).toISOString();
+    
+    const tradeRes = this.db.prepare('DELETE FROM whale_trades WHERE ts < ?').run(cutoff);
+    const alertRes = this.db.prepare('DELETE FROM alerts WHERE created_at < ?').run(cutoff);
+    const signalRes = this.db.prepare('DELETE FROM signals WHERE created_at < ?').run(cutoff);
+    const candRes = this.db.prepare('DELETE FROM whale_candidates WHERE approved = 0 AND last_seen_at < ?').run(cutoff);
+    
+    try {
+      this.db.pragma('wal_checkpoint(PASSIVE)');
+      this.db.pragma('optimize');
+    } catch {
+      // Non-fatal
+    }
+    
+    return {
+      deletedTrades: tradeRes.changes,
+      deletedAlerts: alertRes.changes,
+      deletedSignals: signalRes.changes,
+      deletedCandidates: candRes.changes,
+    };
+  }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
      MIGRATIONS

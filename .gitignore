@@ -26,6 +26,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+*.lnk
 
 # IDE
 .vscode/settings.json

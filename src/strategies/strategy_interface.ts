@@ -11,11 +11,13 @@ export interface StrategyInterface {
   readonly name: string;
   initialize(context: StrategyContext): Promise<void> | void;
   onMarketUpdate(data: MarketData): Promise<void> | void;
+  syncActiveMarkets?(activeMarkets: MarketData[]): void;
   onTimer(): Promise<void> | void;
   generateSignals(): Promise<Signal[]> | Signal[];
   sizePositions(signals: Signal[]): Promise<OrderRequest[]> | OrderRequest[];
   submitOrders(orders: OrderRequest[]): Promise<void> | void;
   notifyFill(order: OrderRequest): void;
+  seedPositions?(positions: import('../types').Position[]): void;
   managePositions(): Promise<void> | void;
   drainExitOrders(): OrderRequest[];
   shutdown(): Promise<void> | void;
@@ -38,7 +40,7 @@ export abstract class BaseStrategy implements StrategyInterface {
    * Per-market cooldown: prevents trading the same market more than once
    * within a cooldown window (default 60 seconds).
    */
-  private tradeCooldowns = new Map<string, number>();
+  protected tradeCooldowns = new Map<string, number>();
   protected cooldownMs = 60_000;
 
   initialize(context: StrategyContext): void {
@@ -49,8 +51,55 @@ export abstract class BaseStrategy implements StrategyInterface {
     this.markets.set(data.marketId, data);
   }
 
+  /**
+   * Synchronise active market universe: retains only markets present in active snapshot,
+   * deleting any dropped/stale markets and purging expired trade cooldowns.
+   */
+  syncActiveMarkets(activeMarkets: MarketData[]): void {
+    const activeIds = new Set(activeMarkets.map((m) => m.marketId));
+
+    // Prune stale markets
+    for (const id of this.markets.keys()) {
+      if (!activeIds.has(id)) {
+        this.markets.delete(id);
+      }
+    }
+
+    // Update active market data
+    for (const m of activeMarkets) {
+      this.markets.set(m.marketId, m);
+    }
+
+    // Prune expired cooldowns
+    const now = Date.now();
+    for (const [key, ts] of this.tradeCooldowns.entries()) {
+      if (now - ts > this.cooldownMs * 2) {
+        this.tradeCooldowns.delete(key);
+      }
+    }
+  }
+
   onTimer(): void {
     return;
+  }
+
+  /** Check whether a market is already held in the wallet across any identifier */
+  protected isMarketPositionHeld(marketId: string, market?: MarketData): boolean {
+    const m = market ?? this.markets.get(marketId);
+    const checkPos = (posMarketId: string, size: number) => {
+      if (size <= 0) return false;
+      if (posMarketId === marketId) return true;
+      if (m) {
+        const target = posMarketId.toLowerCase();
+        if (m.marketId && m.marketId.toLowerCase() === target) return true;
+        if (m.conditionId && m.conditionId.toLowerCase() === target) return true;
+        if (m.slug && m.slug.toLowerCase() === target) return true;
+        if (m.clobTokenIds && m.clobTokenIds.some((t) => t.toLowerCase() === target)) return true;
+      }
+      return false;
+    };
+
+    return (this.context?.wallet.openPositions ?? []).some((p) => checkPos(p.marketId, p.size));
   }
 
   abstract generateSignals(): Signal[];
@@ -60,8 +109,11 @@ export abstract class BaseStrategy implements StrategyInterface {
     const now = Date.now();
     const walletId = this.context?.wallet.walletId ?? 'unknown';
 
-    // Filter out signals for markets still in cooldown
+    // Filter out signals for markets still in cooldown or already held in wallet
     const filtered = signals.filter((s) => {
+      if (this.isMarketPositionHeld(s.marketId)) {
+        return false;
+      }
       const key = `${s.marketId}:${s.outcome}:${s.side}`;
       const lastTrade = this.tradeCooldowns.get(key) ?? 0;
       return now - lastTrade > this.cooldownMs;
@@ -103,18 +155,8 @@ export abstract class BaseStrategy implements StrategyInterface {
         price = Number((0.5 + signal.edge).toFixed(4));
       }
 
-      // Normal sizing
-      let size = Math.max(1, Math.floor(10 * signal.confidence));
-
-      // ── INCUBATION SIZING OVERRIDE ──
-      if (incubationMode) {
-        size = 1; // Micro-lot: prove yourself with minimum risk
-      } else if (strategyWeight >= 2.0) {
-        size = Math.floor(size * Math.min(strategyWeight, 2.5)); // Boost winners
-      } else if (strategyWeight < 1.0) {
-        size = Math.max(1, Math.floor(size * strategyWeight)); // Proportional reduction
-      }
-      // ────────────────────────────────
+      // Strictly 5 shares per trade (Polymarket CLOB minimum allowable order size)
+      const size = 5;
 
       return {
         walletId,
@@ -137,6 +179,13 @@ export abstract class BaseStrategy implements StrategyInterface {
    * Override in subclasses to track positions.
    */
   notifyFill(_order: OrderRequest): void {
+    return;
+  }
+
+  /**
+   * Seed reconciled positions from on-chain/wallet state.
+   */
+  seedPositions(_positions: import('../types').Position[]): void {
     return;
   }
 

@@ -37,6 +37,7 @@ export class WhaleService {
   private clobApi: string;
   private gammaApi: string;
   private analyticsTimer: ReturnType<typeof setInterval> | null = null;
+  private resourceTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
   constructor(config: WhaleTrackingConfig, clobApi: string, gammaApi: string) {
@@ -78,7 +79,15 @@ export class WhaleService {
       void this.refreshAllAnalytics();
     }, 300_000);
 
-    logger.info('WhaleService started — all sub-systems active');
+    // Resource & memory governance every 5 minutes
+    this.resourceTimer = setInterval(() => {
+      this.manageResources();
+    }, 300_000);
+
+    // Initial resource prune
+    this.manageResources();
+
+    logger.info('WhaleService started — all sub-systems active with CPU & memory governance');
   }
 
   stop(): void {
@@ -88,8 +97,49 @@ export class WhaleService {
     this.reconciliation?.stop();
     this.scanner?.stop();
     if (this.analyticsTimer) { clearInterval(this.analyticsTimer); this.analyticsTimer = null; }
+    if (this.resourceTimer) { clearInterval(this.resourceTimer); this.resourceTimer = null; }
     this.db?.close();
     logger.info('WhaleService stopped');
+  }
+
+  /** Run memory and resource governance cycle */
+  manageResources(): void {
+    try {
+      // 1. Prune SQLite DB tables older than 7 days
+      const dbStats = this.db?.pruneOldData(7);
+
+      // 2. Prune scanner accumulators & LRU caches
+      this.scanner?.pruneUnboundedState();
+
+      // 3. Monitor memory usage
+      const mem = process.memoryUsage();
+      const heapUsedMB = Math.round(mem.heapUsed / 1024 / 1024);
+      const rssMB = Math.round(mem.rss / 1024 / 1024);
+
+      logger.info({
+        heapUsedMB,
+        rssMB,
+        deletedTrades: dbStats?.deletedTrades ?? 0,
+      }, 'Whale governance: memory & SQLite cache pruned');
+
+      // 4. Force V8 GC sweep if exposed and heap is high
+      if ((global as unknown as { gc?: () => void }).gc && heapUsedMB > 250) {
+        (global as unknown as { gc: () => void }).gc();
+        logger.info('Whale governance: manual GC sweep executed');
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Whale governance cycle encountered an error');
+    }
+  }
+
+  getMemoryStatus(): { heapUsedMB: number; heapTotalMB: number; rssMB: number; externalMB: number } {
+    const mem = process.memoryUsage();
+    return {
+      heapUsedMB: Math.round(mem.heapUsed / 1024 / 1024),
+      heapTotalMB: Math.round(mem.heapTotal / 1024 / 1024),
+      rssMB: Math.round(mem.rss / 1024 / 1024),
+      externalMB: Math.round(mem.external / 1024 / 1024),
+    };
   }
 
   isRunning(): boolean { return this.running; }

@@ -2,34 +2,90 @@ environment:
   enable_live_trading: true
 
 wallets:
-  - id: live_high_prob
+  - id: MIspricing-Live
     mode: LIVE
-    strategy: filtered_high_prob_convergence
-    capital: 20
+    strategy: mispricing_arbitrage
+    capital: 10
     risk_limits:
-      max_position_size: 2
+      max_position_size: 5
       max_exposure_per_market: 10
-      max_daily_loss: 13
-      max_open_trades: 3
+      max_daily_loss: 6.5
+      max_open_trades: 5
+      max_drawdown: 0.65
+
+  - id: "market making"
+    mode: LIVE
+    strategy: market_making
+    capital: 10
+    risk_limits:
+      max_position_size: 5
+      max_exposure_per_market: 10
+      max_daily_loss: 6.5
+      max_open_trades: 5
+      max_drawdown: 0.65
+
+  - id: "Copy trade - live"
+    mode: LIVE
+    strategy: copy_trade
+    capital: 15
+    risk_limits:
+      max_position_size: 5
+      max_exposure_per_market: 10
+      max_daily_loss: 9.75
+      max_open_trades: 5
       max_drawdown: 0.65
 
 strategy_config:
   filtered_high_prob_convergence:
     enabled: true
-    min_prob: 0.80
-    max_prob: 0.96
-    min_liquidity_usd: 5000
+    min_prob: 0.55
+    max_prob: 0.75
+    min_liquidity_usd: 10000
     max_spread_bps: 120
-    max_days_to_resolution: 14
-    max_position_usd_per_market: 2
-    max_total_open_positions: 3
+    max_days_to_resolution: 7
+    max_position_usd_per_market: 5
+    max_total_open_positions: 6
     max_daily_loss_pct: 0.65
     max_weekly_drawdown_pct: 0.65
   mispricing_arbitrage:
     min_dislocation: 0.03
+  market_making:
+    minVolume: 1500
+    minLiquidity: 300
+    spread_bps: 40
+  copy_trade:
+    whale_addresses: []
+    poll_interval_seconds: 15
+    fixed_size: 5
+    min_trade_size_usd: 50
+    max_trade_size_usd: 50000
   ai_forecast:
     refresh_minutes: 30
-  market_making:
-    spread_bps: 40
   momentum:
     lookback_minutes: 15
+
+whale_tracking:
+  enabled: true
+  db_path: .runtime/whales.db
+  poll_interval_ms: 30000
+  max_requests_per_minute: 45
+  candidate_scan_interval_ms: 300000
+  candidate_min_volume_usd_24h: 10000
+  candidate_min_trades_24h: 10
+  scanner:
+    enabled: true
+    scan_interval_ms: 300000
+    markets_per_scan: 20
+    min_market_liquidity_usd: 10000
+    min_market_volume_24h_usd: 5000
+    trades_per_market: 200
+    trade_page_depth: 2
+    parallel_fetch_batch: 4
+    auto_promote_enabled: true
+    auto_promote_min_score: 70
+    auto_promote_max_per_scan: 3
+    big_trade_min_usd: 5000
+    cross_ref_enabled: true
+    cross_ref_max_per_batch: 5
+    cluster_detection_enabled: true
+

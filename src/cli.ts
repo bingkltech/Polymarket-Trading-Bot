@@ -22,8 +22,13 @@ import type { WhaleTrackingConfig, ScannerConfig } from './whales/whale_types';
 const program = new Command();
 const statePath = path.resolve('.runtime/state.json');
 
-import { ModelCritic } from './learning/critic';
-import { TradeMemoryBank } from './learning/memory_bank';
+// Global Resilience: Prevent transient API timeouts/hang-ups from terminating the daemon
+process.on('uncaughtException', (err) => {
+  logger.error({ err }, 'Uncaught exception intercepted in daemon loop — preserving process stability');
+});
+process.on('unhandledRejection', (reason) => {
+  logger.warn({ reason }, 'Unhandled promise rejection intercepted — continuing execution');
+});
 
 /* ── Config normalization helpers ── */
 
@@ -193,12 +198,6 @@ program
     const dashboardPort = Number(process.env.DASHBOARD_PORT ?? 3000);
     const dashboardServer = new DashboardServer(walletManager, dashboardPort);
 
-    /* ── Deerflow Incubation Critic ── */
-    const memoryBank = TradeMemoryBank.getInstance();
-    const critic = new ModelCritic(memoryBank);
-    critic.start();
-    logger.info('Deerflow Model Critic active (30min grading loop)');
-
     /* ── Whale Tracking Engine ── */
     const rawConfig = YAML.parse(fs.readFileSync(options.config, 'utf8')) as Record<string, unknown>;
     const whaleConfigRaw = (rawConfig.whale_tracking ?? {}) as Record<string, unknown>;
@@ -227,9 +226,14 @@ program
     const engine = new Engine(config, walletManager, orderRouter);
     await engine.initialize();
     dashboardServer.setEngine(engine);
-    engine.start();
+    await engine.start();
 
     writeState({ status: 'running', startedAt: new Date().toISOString() });
+
+    // Persistent Heartbeat Anchor: Keeps the background daemon anchored forever
+    setInterval(() => {
+      logger.debug('Daemon heartbeat alive');
+    }, 15_000);
   });
 
 program

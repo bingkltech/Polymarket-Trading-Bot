@@ -61,7 +61,7 @@ export class SpreadStrategy extends BaseStrategy {
   private minLiquidity = 300;
   private minSpread = 0.004;        // 40 bps minimum spread to be profitable
   private maxInventoryPerMarket = 60; // max shares per side per market
-  private maxTotalMarkets = 12;       // max number of markets to quote
+  private maxTotalMarkets = 2;        // max number of markets to quote (aligned with $10 sub-wallet budget)
   private inventorySkewFactor = 0.3;  // how much to skew quotes with inventory
   private volSpreadMultiplier = 2.0;  // widen spread with volatility
 
@@ -97,11 +97,27 @@ export class SpreadStrategy extends BaseStrategy {
     for (const [, market] of sorted) {
       if (quotedMarkets >= this.maxTotalMarkets) break;
 
+      // 0. Single-Position Rule: Skip markets where we already hold an open position
+      if (this.isMarketPositionHeld(market.marketId, market)) continue;
+
+      // 0a. Exclude dynamic / high-fee crypto short-term markets (e.g. 15m, 1h, up-down)
+      const q = (market.question || '').toLowerCase();
+      const s = (market.slug || '').toLowerCase();
+      const isHighFeeCrypto = q.includes('15m') || q.includes('15 min') || q.includes('1 hour') || q.includes('up or down') || s.includes('updown') || s.includes('15m') || s.includes('1h');
+      if (isHighFeeCrypto) continue;
+
+      // 0b. 7-Day Resolution Horizon: Exclude events resolving further than 7 days out
+      if (!market.endDate) continue;
+      const daysLeft = (new Date(market.endDate).getTime() - Date.now()) / 86_400_000;
+      if (daysLeft <= 0 || daysLeft > 7) continue;
+
+      const yesPrice = market.outcomePrices[0] ?? 0.50;
+      const leadingProb = Math.max(yesPrice, 1 - yesPrice);
+      // Safe probability band (50% - 75% to prevent steamroller)
+      if (leadingProb < 0.50 || leadingProb > 0.75) continue;
+
       const spread = market.ask - market.bid;
       if (spread < this.minSpread) continue;
-
-      const yesPrice = market.outcomePrices[0];
-      if (yesPrice < 0.05 || yesPrice > 0.95) continue;
 
       /* Adverse selection check: skip if recent price moved sharply */
       if (this.hasRecentSpike(market.marketId)) continue;
@@ -121,8 +137,11 @@ export class SpreadStrategy extends BaseStrategy {
       const buyEdge = halfSpread * 0.6 - skew;   // reduce buy edge when long
       const sellEdge = halfSpread * 0.6 + skew;   // increase sell edge when long
 
-      /* Only quote buy side if not maxed out on inventory */
-      if (inv.yesShares < this.maxInventoryPerMarket && buyEdge > 0.001) {
+      const available = this.context?.wallet.availableBalance ?? 0;
+      const canBuy = available >= 2.00;
+
+      /* Only quote buy side if wallet has capital, not maxed out on inventory, and not already held */
+      if (canBuy && inv.yesShares < this.maxInventoryPerMarket && buyEdge > 0.001) {
         signals.push({
           marketId: market.marketId,
           outcome: 'YES',
@@ -133,7 +152,7 @@ export class SpreadStrategy extends BaseStrategy {
       }
 
       /* Only quote sell side if we actually hold YES shares to sell */
-      if (inv.yesShares > 0 && sellEdge > 0.001) {
+      if (inv.yesShares >= 5 && sellEdge > 0.001) {
         signals.push({
           marketId: market.marketId,
           outcome: 'YES',
@@ -152,35 +171,66 @@ export class SpreadStrategy extends BaseStrategy {
   /** Override to use real bid/ask for pricing with inventory skew */
   override sizePositions(signals: Signal[]): OrderRequest[] {
     const orders = super.sizePositions(signals);
-    const capital = this.context?.wallet.capitalAllocated ?? 0;
+    const capital = this.context?.wallet.availableBalance ?? this.context?.wallet.capitalAllocated ?? 0;
     if (capital <= 0) return [];
 
     return orders.map((order) => {
       const market = this.markets.get(order.marketId);
-      if (!market) return order;
+      if (!market) return null as any;
+
+      // Single-Position Rule for BUY
+      if (order.side === 'BUY' && this.isMarketPositionHeld(order.marketId, market)) {
+        return null as any;
+      }
 
       const inv = this.inventory.get(order.marketId) ?? { yesShares: 0, noShares: 0, totalCost: 0 };
       const netInventory = inv.yesShares - inv.noShares;
       const skew = netInventory * this.inventorySkewFactor * 0.001;
 
       const offset = Math.max(0.001, (market.ask - market.bid) * 0.3);
-      let price: number;
+      let rawPrice: number;
 
       if (order.side === 'BUY') {
-        price = market.bid + offset - skew; // bid less when long
+        rawPrice = market.bid + offset - skew; // bid less when long
       } else {
-        price = market.ask - offset - skew; // ask less when long (attract sellers)
+        rawPrice = market.ask - offset - skew; // ask less when long (attract sellers)
       }
 
-      price = Number(Math.max(0.01, Math.min(0.99, price)).toFixed(4));
+      const safePrice = Number((Math.round(rawPrice * 100) / 100).toFixed(2));
+      const price = Math.max(0.01, Math.min(0.75, safePrice)); // Anti-steamroller ceiling <= 0.75
+      if (safePrice > 0.75) {
+        return null as any;
+      }
 
-      /* Size: smaller when inventory is building up */
-      const inventoryPenalty = Math.max(0.3, 1 - Math.abs(netInventory) / this.maxInventoryPerMarket);
-      const baseSize = Math.max(1, Math.floor(capital * 0.01 / price));
-      const adjustedSize = Math.max(1, Math.floor(baseSize * inventoryPenalty));
+      // Enforce strictly 5 shares (Polymarket CLOB minimum size)
+      const size = 5;
+      if (order.side === 'BUY' && size * price > capital) {
+        return null as any;
+      }
+      if (order.side === 'SELL' && inv.yesShares < size) {
+        return null as any; // Never place naked SELL
+      }
 
-      return { ...order, price, size: adjustedSize };
-    });
+      return { ...order, price, size };
+    }).filter((o): o is OrderRequest => Boolean(o));
+  }
+
+  /** Seed existing positions from live wallet/on-chain sync */
+  override seedPositions(positions: import('../../types').Position[]): void {
+    const valid = positions.filter((p) => p.size > 0);
+    const newInventory = new Map<string, { yesShares: number; noShares: number; totalCost: number }>();
+    for (const pos of valid) {
+      const inv = newInventory.get(pos.marketId) ?? { yesShares: 0, noShares: 0, totalCost: 0 };
+      if (pos.outcome === 'YES') {
+        inv.yesShares = pos.size;
+        inv.totalCost = pos.avgPrice * pos.size;
+      } else {
+        inv.noShares = pos.size;
+        inv.totalCost = pos.avgPrice * pos.size;
+      }
+      newInventory.set(pos.marketId, inv);
+    }
+    this.inventory = newInventory;
   }
 
   /** Track inventory on fill via engine callback */
@@ -194,7 +244,7 @@ export class SpreadStrategy extends BaseStrategy {
       const sellSize = Math.min(order.size, inv.yesShares);
       if (sellSize <= 0) return;
       inv.yesShares -= sellSize;
-      inv.totalCost -= order.price * sellSize;
+      inv.totalCost -= (inv.totalCost / Math.max(inv.yesShares + sellSize, 1)) * sellSize;
     } else if (order.side === 'BUY' && order.outcome === 'NO') {
       inv.noShares += order.size;
       inv.totalCost += order.price * order.size;
@@ -202,7 +252,7 @@ export class SpreadStrategy extends BaseStrategy {
       const sellSize = Math.min(order.size, inv.noShares);
       if (sellSize <= 0) return;
       inv.noShares -= sellSize;
-      inv.totalCost -= order.price * sellSize;
+      inv.totalCost -= (inv.totalCost / Math.max(inv.noShares + sellSize, 1)) * sellSize;
     }
     this.inventory.set(order.marketId, inv);
   }
@@ -212,9 +262,29 @@ export class SpreadStrategy extends BaseStrategy {
     return;
   }
 
-  /** Manage: liquidate inventory when spread collapses, market near resolution, or inventory too large */
+  /** Manage: liquidate inventory when spread collapses, market near resolution, stop-loss hit, or take-profit reached */
   override managePositions(): void {
     const walletId = this.context?.wallet.walletId ?? 'unknown';
+
+    // Synchronize inventory strictly with actual live wallet open positions
+    if (this.context?.wallet.openPositions) {
+      const openPosMap = new Map<string, number>();
+      for (const pos of this.context.wallet.openPositions) {
+        if (pos.size > 0 && pos.outcome === 'YES') {
+          openPosMap.set(pos.marketId.toLowerCase(), pos.size);
+          const inv = this.inventory.get(pos.marketId) ?? { yesShares: 0, noShares: 0, totalCost: 0 };
+          inv.yesShares = pos.size;
+          inv.totalCost = pos.avgPrice * pos.size;
+          this.inventory.set(pos.marketId, inv);
+        }
+      }
+      // Purge phantom inventory keys that are not held on-chain
+      for (const marketId of this.inventory.keys()) {
+        if (!openPosMap.has(marketId.toLowerCase())) {
+          this.inventory.delete(marketId);
+        }
+      }
+    }
 
     for (const [marketId, inv] of this.inventory.entries()) {
       const market = this.markets.get(marketId);
@@ -224,58 +294,72 @@ export class SpreadStrategy extends BaseStrategy {
       if (netYes <= 0) continue;     // nothing to unwind
 
       const spread = market.ask - market.bid;
-      const yesPrice = market.outcomePrices[0];
-      const currentAsk = market.ask;
+      const yesPrice = market.outcomePrices[0] ?? market.midPrice ?? 0.5;
+      const currentBid = market.bid > 0 ? market.bid : (yesPrice - 0.01);
+      const currentAsk = market.ask > 0 ? market.ask : (yesPrice + 0.01);
+      const avgCost = inv.totalCost / Math.max(netYes, 1);
 
       let exitReason: string | undefined;
       let exitSize = 0;
+      let exitPrice = currentAsk; // Default to maker price near ask
 
-      // 1. Spread collapsed below profitability → full unwind
-      if (spread < this.minSpread * 0.5) {
-        exitReason = 'SPREAD_COLLAPSED';
+      // 1. Quant Tier 1: Pre-Resolution De-Risking (>= 92c Ceiling)
+      // Unwind inventory via maker limit near 93c-94c to capture 90%+ profits and free capital
+      if (yesPrice >= 0.92 || currentBid >= 0.92) {
+        exitReason = 'ALPHA_HARVEST_CEILING (>=92c)';
         exitSize = netYes;
+        exitPrice = Math.min(0.96, Math.max(currentBid, 0.93));
       }
 
-      // 2. Market approaching resolution → full flatten
-      if (!exitReason && (yesPrice > 0.95 || yesPrice < 0.05)) {
-        exitReason = 'NEAR_RESOLUTION';
+      // 2. Severe adverse collapse (< 5c or 20% loss): Unwind residual inventory
+      if (!exitReason && yesPrice < 0.05) {
+        exitReason = 'SEVERE_COLLAPSE (<5c)';
         exitSize = netYes;
+        exitPrice = currentBid;
       }
 
-      // 3. Inventory exceeds max → trim to max
+      // 3. Take Profit: if current price gained >= 3% above entry price, post passive ask to harvest spread
+      if (!exitReason && netYes > 0 && yesPrice >= avgCost * 1.03) {
+        exitReason = 'TAKE_PROFIT_SPREAD_HARVEST';
+        exitSize = netYes;
+        exitPrice = Math.max(currentAsk, avgCost + 0.02);
+      }
+
+      // 4. Inventory exceeds max → trim excess via maker limit near mid/ask
       if (!exitReason && netYes > this.maxInventoryPerMarket) {
-        exitReason = 'INVENTORY_OVERFLOW';
+        exitReason = 'INVENTORY_OVERFLOW_TRIM';
         exitSize = netYes - this.maxInventoryPerMarket;
+        exitPrice = Math.max(currentBid + 0.01, yesPrice);
       }
 
-      // 4. Unrealized loss: if avg cost > current price by >3%, unwind half
-      if (!exitReason && netYes > 0) {
-        const avgCost = inv.totalCost / Math.max(netYes, 1);
-        if (avgCost > 0 && yesPrice < avgCost * 0.97) {
-          exitReason = 'ADVERSE_MOVE';
-          exitSize = Math.max(1, Math.floor(netYes / 2));
-        }
+      // 5. True Stop-Loss (15% adverse price drop from entry): Exit at bid
+      if (!exitReason && netYes > 0 && avgCost > 0 && yesPrice <= avgCost * 0.85) {
+        exitReason = 'STOP_LOSS_ADVERSE_DROP (15%)';
+        exitSize = netYes;
+        exitPrice = currentBid;
       }
 
       if (exitReason && exitSize > 0) {
         logger.info(
-          { strategy: this.name, marketId, reason: exitReason, size: exitSize, inventory: netYes },
+          { strategy: this.name, marketId, reason: exitReason, size: exitSize, inventory: netYes, yesPrice, exitPrice },
           `MM: exiting inventory — ${exitReason}`,
         );
+
+        const safeExitPrice = Number(Math.max(0.01, Math.min(0.99, Math.round(exitPrice * 100) / 100)).toFixed(2));
 
         this.pendingExits.push({
           walletId,
           marketId,
           outcome: 'YES',
           side: 'SELL',
-          price: Number(Math.max(0.02, currentAsk - 0.002).toFixed(4)), // hit the bid aggressively
+          price: safeExitPrice,
           size: exitSize,
           strategy: this.name,
         });
 
-        // Update local inventory tracking immediately
-        inv.yesShares -= exitSize;
-        inv.totalCost -= (inv.totalCost / Math.max(netYes, 1)) * exitSize;
+        // Set local inventory to 0 so we don't spam duplicate exits before the fill is processed
+        inv.yesShares = Math.max(0, inv.yesShares - exitSize);
+        inv.totalCost = Math.max(0, inv.totalCost - (inv.totalCost / Math.max(netYes, 1)) * exitSize);
       }
     }
   }

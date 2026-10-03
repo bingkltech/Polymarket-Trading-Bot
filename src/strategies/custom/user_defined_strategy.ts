@@ -67,10 +67,10 @@ const DEFAULTS: UserParams = {
   rsiOverbought: 70,
   rsiOversold: 30,
   maxPositions: 8,
-  takeProfitBps: 120,
-  stopLossBps: 100,
-  trailingActivation: 60,
-  trailingDistance: 35,
+  takeProfitBps: 400,
+  stopLossBps: 800,
+  trailingActivation: 200,
+  trailingDistance: 80,
   maxHoldMinutes: 45,
   positionSizePct: 0.02,
 };
@@ -142,7 +142,8 @@ export class UserDefinedStrategy extends BaseStrategy {
   generateSignals(): Signal[] {
     const { params } = this;
     const signals: Signal[] = [];
-    if (this.positions.length >= params.maxPositions) return signals;
+    const available = this.context?.wallet.availableBalance ?? 0;
+    if (available < 2.00 || this.positions.length >= params.maxPositions) return signals;
 
     for (const [marketId, market] of this.markets) {
       // ── Filters ────────────────────────────────────────────
@@ -298,10 +299,14 @@ export class UserDefinedStrategy extends BaseStrategy {
       pos.peakBps = Math.max(pos.peakBps, edgeBps);
       const holdingMin = (Date.now() - pos.entryTime) / 60_000;
 
-      let exitReason: string | undefined;
+      let exitReason: string | null = null;
+      // Pre-resolution de-risking ceiling (>= 92c)
+      if (currentPrice >= 0.92) {
+        exitReason = 'ALPHA_HARVEST_CEILING (>=92c)';
+      }
 
       // Take profit
-      if (edgeBps >= params.takeProfitBps) { exitReason = 'TAKE_PROFIT'; }
+      if (!exitReason && edgeBps >= params.takeProfitBps) { exitReason = 'TAKE_PROFIT'; }
 
       // Stop loss
       if (!exitReason && edgeBps <= -params.stopLossBps) { exitReason = 'STOP_LOSS'; }

@@ -38,6 +38,7 @@ export type LogCategory =
   | 'ENGINE'
   | 'STRATEGY'
   | 'WALLET'
+  | 'PENALTY_BOX'
   | 'SYSTEM'
   | 'ERROR';
 

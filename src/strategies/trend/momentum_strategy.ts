@@ -45,12 +45,12 @@ const ADX_MIN         = 0.15;
 const MA_CROSS_MIN_BPS = 10;
 const HISTORY_LENGTH  = 30;
 
-/* ── Exit parameters ── */
-const TP_BPS          = 100;
-const SL_BPS          = 80;
-const TRAIL_ACTIVATE  = 60;
-const TRAIL_DEDUCT    = 25;
-const TREND_REVERSAL_GAP = 0.004;
+/* ── Exit parameters (Calibrated for Polymarket discrete 1-cent tick grid) ── */
+const TP_BPS          = 400;  // +4c net take profit
+const SL_BPS          = 800;  // -8c stop loss from midpoint
+const TRAIL_ACTIVATE  = 250;  // activate trailing stop after +2.5c gain
+const TRAIL_DEDUCT    = 100;  // trail 1.0c behind peak
+const TREND_REVERSAL_GAP = 0.02; // 2c gap
 const TIME_EXIT_MIN   = 45;
 
 interface PriceVolume {
@@ -136,6 +136,9 @@ export class MomentumStrategy extends BaseStrategy {
 
   generateSignals(): Signal[] {
     const signals: Signal[] = [];
+    const available = this.context?.wallet.availableBalance ?? 0;
+    if (available < 2.00) return signals;
+
     const now = Date.now();
     this.scanCount++;
 
@@ -151,6 +154,12 @@ export class MomentumStrategy extends BaseStrategy {
 
       const yesPrice = market.outcomePrices[0];
       if (yesPrice < 0.10 || yesPrice > 0.90) continue;
+
+      // Exclude dynamic / high-fee crypto short-term markets (e.g. 15m, 1h, up-down)
+      const q = (market.question || '').toLowerCase();
+      const s = (market.slug || '').toLowerCase();
+      const isHighFeeCrypto = q.includes('15m') || q.includes('15 min') || q.includes('1 hour') || q.includes('up or down') || s.includes('updown') || s.includes('15m') || s.includes('1h');
+      if (isHighFeeCrypto) continue;
 
       // Already have position?
       if (this.managedPositions.has(marketId)) continue;

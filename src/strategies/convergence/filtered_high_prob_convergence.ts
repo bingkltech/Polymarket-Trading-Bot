@@ -7,6 +7,7 @@ import {
 } from '../../types';
 import { TradeHistory, PricePoint } from '../../data/trade_history';
 import { logger } from '../../reporting/logs';
+import { MarketPenaltyBox } from '../../learning/penalty_box';
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    Default configuration – overridden by config.yaml values
@@ -14,10 +15,10 @@ import { logger } from '../../reporting/logs';
 const DEFAULTS: ConvergenceConfig = {
   enabled: true,
   min_liquidity_usd: 5_000,
-  min_prob: 0.78,
-  max_prob: 0.96,
+  min_prob: 0.55,
+  max_prob: 0.75,
   max_spread_bps: 120,
-  max_days_to_resolution: 14,
+  max_days_to_resolution: 7,
   spike_pct: 0.05,
   spike_lookback_minutes: 60,
   min_depth_usd_within_1pct: 1_000,
@@ -27,14 +28,14 @@ const DEFAULTS: ConvergenceConfig = {
   max_correlated_exposure_pct: 0.30,
   base_risk_pct: 0.20,
   max_position_usd_per_market: 5,
-  max_total_open_positions: 3,
+  max_total_open_positions: 6,
   ttl_seconds: 120,
   allow_take_on_momentum: false,
   take_profit_bps: 150,
   stop_loss_bps: 250,
   time_exit_hours: 48,
-  max_daily_loss_pct: 0.05,
-  max_weekly_drawdown_pct: 0.10,
+  max_daily_loss_pct: 0.65,
+  max_weekly_drawdown_pct: 0.65,
   max_market_mle_pct: 0.25,
   max_total_mle_pct: 0.50,
   max_orders_per_minute: 5,
@@ -176,27 +177,65 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
   override onMarketUpdate(data: MarketData): void {
     super.onMarketUpdate(data);
 
-    /* Price history for spike / anti-chasing detection */
-    const clobId = data.clobTokenIds[0];
+    /* Price history for spike / anti-chasing detection (capped at 240 samples = 60 min) */
+    const clobId = data.clobTokenIds?.[0];
     if (clobId) {
       const history = this.priceCache.get(clobId) ?? [];
       history.push({ price: data.midPrice, timestamp: data.timestamp });
-      if (history.length > 480) history.shift();
+      if (history.length > 240) history.shift();
       this.priceCache.set(clobId, history);
     }
 
-    /* Volume history for volume-trend filter */
+    /* Volume history for volume-trend filter (capped at 240 samples) */
     const volHistory = this.volumeCache.get(data.marketId) ?? [];
     volHistory.push({ volume: data.volume24h, timestamp: data.timestamp });
-    if (volHistory.length > 480) volHistory.shift();
+    if (volHistory.length > 240) volHistory.shift();
     this.volumeCache.set(data.marketId, volHistory);
+  }
+
+  /**
+   * Synchronise active market universe and immediately prune any stale/dropped
+   * market price histories, volume histories, and zero-exposure clusters.
+   */
+  override syncActiveMarkets(activeMarkets: MarketData[]): void {
+    super.syncActiveMarkets(activeMarkets);
+
+    const activeMarketIds = new Set(activeMarkets.map((m) => m.marketId));
+    const activeTokenIds = new Set<string>();
+    for (const m of activeMarkets) {
+      if (m.clobTokenIds) {
+        for (const tid of m.clobTokenIds) activeTokenIds.add(tid);
+      }
+    }
+
+    // Prune price cache for dropped tokens
+    for (const tid of this.priceCache.keys()) {
+      if (!activeTokenIds.has(tid)) {
+        this.priceCache.delete(tid);
+      }
+    }
+
+    // Prune volume cache for dropped markets
+    for (const mid of this.volumeCache.keys()) {
+      if (!activeMarketIds.has(mid)) {
+        this.volumeCache.delete(mid);
+      }
+    }
+
+    // Prune zero cluster exposure
+    for (const [eventId, exp] of this.clusterExposure.entries()) {
+      if (exp <= 0) {
+        this.clusterExposure.delete(eventId);
+      }
+    }
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
      2. SIGNAL GENERATION — apply all 8 filters
      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
   override generateSignals(): Signal[] {
-    if (!this.cfg.enabled) return [];
+    const available = this.context?.wallet.availableBalance ?? 0;
+    if (!this.cfg.enabled || available < 2.00) return [];
 
     /* ── Drawdown guard ── */
     if (this.isDailyLossBreached() || this.isWeeklyDrawdownBreached()) return [];
@@ -210,8 +249,18 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       if (result) signals.push(result);
     }
 
-    /* Sort signals by confidence descending – best setups first */
-    signals.sort((a, b) => b.confidence - a.confidence);
+    /* Sort signals across all scanned markets using 4-factor ranking:
+       1. High Probability of Winning (Implied probability * Model confidence)
+       2. 24h Volume (log-scaled)
+       3. Orderbook Liquidity (log-scaled)
+       4. Price Volatility (1d/1w price change and rolling volatility) */
+    signals.sort((a, b) => {
+      const mktA = this.markets.get(a.marketId);
+      const mktB = this.markets.get(b.marketId);
+      const rankA = this.computeCompositeRank(mktA, a);
+      const rankB = this.computeCompositeRank(mktB, b);
+      return rankB - rankA;
+    });
 
     if (evaluated > 0) {
       logger.info(
@@ -221,6 +270,73 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
     }
 
     return signals;
+  }
+
+  /**
+   * Multi-Factor Ranking Score across 4 core criteria:
+   * 1. High Probability of Winning: leading prob * confidence (in safe 55%-75% band)
+   * 2. Volume: 24h volume (log10 scaled)
+   * 3. Liquidity: orderbook liquidity (log10 scaled)
+   * 4. Volatility: daily/weekly price movement and rolling volatility
+   */
+  private computeCompositeRank(m: MarketData | undefined, s: Signal): number {
+    if (!m) return s.confidence;
+
+    // 1. High Probability of Winning Factor (0.55 - 0.75 band * setup confidence)
+    const leadingProb = Math.max(m.midPrice, 1 - m.midPrice);
+    const winProbFactor = leadingProb * (0.5 + s.confidence * 0.5);
+
+    // 2. Volume Factor (log10 scaled)
+    const volFactor = Math.log10(Math.max(1000, m.volume24h));
+
+    // 3. Liquidity Factor (log10 scaled)
+    const liqFactor = Math.log10(Math.max(1000, m.liquidity));
+
+    // 4. Volatility Factor (daily change, weekly change, or rolling price stdDev)
+    const dailyChange = Math.abs(m.oneDayPriceChange ?? 0);
+    const weeklyChange = Math.abs(m.oneWeekPriceChange ?? 0);
+    const spreadBps = (m.spread / Math.max(0.001, m.midPrice)) * 10_000;
+
+    let rollingVol = 0;
+    const clobId = m.clobTokenIds?.[0];
+    if (clobId) {
+      const hist = this.priceCache.get(clobId);
+      if (hist && hist.length >= 4) {
+        const prices = hist.map((p) => p.price);
+        const mean = prices.reduce((a, b) => a + b, 0) / prices.length;
+        const variance = prices.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / prices.length;
+        rollingVol = Math.sqrt(variance);
+      }
+    }
+
+    const volatility = Math.max(0.005, dailyChange, weeklyChange / 2, rollingVol, spreadBps / 10_000);
+    const volatilityMultiplier = 1 + Math.min(2.0, volatility * 10);
+
+    return winProbFactor * volFactor * liqFactor * volatilityMultiplier;
+  }
+
+  /**
+   * Check whether a market is already held in managed positions or the wallet
+   * across any identifier (marketId, conditionId, slug, or clobTokenIds).
+   */
+  protected override isMarketPositionHeld(marketId: string, market?: MarketData): boolean {
+    const m = market ?? this.markets.get(marketId);
+    const checkPos = (posMarketId: string, size: number) => {
+      if (size <= 0) return false;
+      if (posMarketId === marketId) return true;
+      if (m) {
+        const target = posMarketId.toLowerCase();
+        if (m.marketId && m.marketId.toLowerCase() === target) return true;
+        if (m.conditionId && m.conditionId.toLowerCase() === target) return true;
+        if (m.slug && m.slug.toLowerCase() === target) return true;
+        if (m.clobTokenIds && m.clobTokenIds.some((t) => t.toLowerCase() === target)) return true;
+      }
+      return false;
+    };
+
+    const heldInManaged = this.managedPositions.some((p) => checkPos(p.marketId, p.size));
+    const heldInWallet = (this.context?.wallet.openPositions ?? []).some((p) => checkPos(p.marketId, p.size));
+    return heldInManaged || heldInWallet;
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -246,6 +362,11 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       const market = this.markets.get(order.marketId);
       if (!market) continue;
 
+      /* Single-Position Rule: NEVER buy into a market where a position already exists */
+      if (this.isMarketPositionHeld(order.marketId, market)) {
+        continue;
+      }
+
       /* Rate-limit check */
       if (!this.checkRateLimit()) {
         logger.warn({ strategy: this.name }, 'Order rate limit reached – pausing entries');
@@ -257,8 +378,9 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       if (score.value < 0.60) continue; // Require high setup quality
 
       /* Entry price calculated and rounded to 2 decimal places for Polymarket CLOB */
-      const rawPrice = this.computeEntryPrice(market, order.side);
-      const entryPrice = Math.max(0.01, Math.min(0.99, Number((Math.round(rawPrice * 100) / 100).toFixed(2))));
+      const rawPrice = this.computeEntryPrice(market, order.side, order.outcome);
+      const entryPrice = Math.max(0.01, Math.min(0.75, Number((Math.round(rawPrice * 100) / 100).toFixed(2))));
+      if (entryPrice > 0.75) continue; // Anti-Steamroller Guardrail
 
       /* Base size scaled by score, respecting wallet limits */
       const baseUsd = capital * (this.cfg.base_risk_pct ?? 0.05);
@@ -270,14 +392,9 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       const maxMle = capital * (this.cfg.max_market_mle_pct ?? 0.25);
       positionUsd = Math.min(positionUsd, maxMle);
 
-      /* Convert USD to integer shares — strictly 1 to 2 shares max per trade */
-      const minShares = Math.ceil(1.00 / entryPrice);
-      let shares = Math.min(2, Math.max(1, minShares));
-      if (shares * entryPrice < 1.00) {
-        shares = Math.min(2, Math.ceil(1.00 / entryPrice));
-      }
-      if (shares * entryPrice < 1.00 || shares > 2) {
-        // Cannot satisfy $1.00 min notional within 2 shares limit -> skip
+      /* Convert USD to integer shares — strictly 5 shares (Polymarket CLOB minimum size) */
+      const shares = 5;
+      if (shares * entryPrice > capital) {
         continue;
       }
 
@@ -337,6 +454,26 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
     );
   }
 
+  /** Seed existing positions from live wallet/on-chain sync */
+  override seedPositions(positions: import('../../types').Position[]): void {
+    const valid = positions.filter((p) => p.size > 0);
+    this.managedPositions = valid.map((pos) => {
+      const existing = this.managedPositions.find((p) => p.marketId === pos.marketId && p.outcome === pos.outcome);
+      return {
+        marketId: pos.marketId,
+        outcome: pos.outcome,
+        entryPrice: pos.avgPrice,
+        entryTime: existing?.entryTime ?? Date.now(),
+        size: pos.size,
+        costBasis: pos.avgPrice * pos.size,
+        peakBps: existing?.peakBps ?? 0,
+        partialExitsTaken: existing?.partialExitsTaken ?? 0,
+        originalSize: existing?.originalSize ?? pos.size,
+        setupScore: existing?.setupScore ?? 0.7,
+      };
+    });
+  }
+
   /** Legacy — position tracking now handled by notifyFill */
   override submitOrders(_orders: OrderRequest[]): void {
     return;
@@ -352,7 +489,20 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
     const partialSells: { pos: ManagedPosition; sellShares: number; reason: string }[] = [];
 
     for (const pos of this.managedPositions) {
-      const market = this.markets.get(pos.marketId);
+      let market = this.markets.get(pos.marketId);
+      if (!market) {
+        const target = pos.marketId.toLowerCase();
+        for (const [, m] of this.markets) {
+          if (
+            (m.conditionId && m.conditionId.toLowerCase() === target) ||
+            (m.slug && m.slug.toLowerCase() === target) ||
+            (m.clobTokenIds && m.clobTokenIds.some((t) => t.toLowerCase() === target))
+          ) {
+            market = m;
+            break;
+          }
+        }
+      }
       if (!market) continue;
 
       const currentMid = market.midPrice;
@@ -366,18 +516,18 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
 
       let exitReason: string | undefined;
 
-      /* ── Partial Exit 1: take 1/3 at +100 bps ── */
-      if (pos.partialExitsTaken === 0 && entryBps >= this.PARTIAL_EXIT_1_BPS && pos.size > 2) {
-        const sellShares = Math.max(1, Math.floor(pos.originalSize / 3));
-        partialSells.push({ pos, sellShares, reason: `PARTIAL_1 (+${entryBps.toFixed(0)} bps)` });
+      /* ── Partial Exit 1: take 1/3 at +100 bps (only if partial size >= 5) ── */
+      const partial1Shares = Math.floor(pos.originalSize / 3);
+      if (pos.partialExitsTaken === 0 && entryBps >= this.PARTIAL_EXIT_1_BPS && partial1Shares >= 5 && pos.size > partial1Shares) {
+        partialSells.push({ pos, sellShares: partial1Shares, reason: `PARTIAL_1 (+${entryBps.toFixed(0)} bps)` });
         pos.partialExitsTaken = 1;
         continue; // don't evaluate further exits this tick
       }
 
-      /* ── Partial Exit 2: take another 1/3 at +160 bps ── */
-      if (pos.partialExitsTaken === 1 && entryBps >= this.PARTIAL_EXIT_2_BPS && pos.size > 1) {
-        const sellShares = Math.max(1, Math.floor(pos.originalSize / 3));
-        partialSells.push({ pos, sellShares, reason: `PARTIAL_2 (+${entryBps.toFixed(0)} bps)` });
+      /* ── Partial Exit 2: take another 1/3 at +160 bps (only if partial size >= 5) ── */
+      const partial2Shares = Math.floor(pos.originalSize / 3);
+      if (pos.partialExitsTaken === 1 && entryBps >= this.PARTIAL_EXIT_2_BPS && partial2Shares >= 5 && pos.size > partial2Shares) {
+        partialSells.push({ pos, sellShares: partial2Shares, reason: `PARTIAL_2 (+${entryBps.toFixed(0)} bps)` });
         pos.partialExitsTaken = 2;
         continue;
       }
@@ -400,8 +550,13 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
         exitReason = `STOP_LOSS (${entryBps.toFixed(0)} bps)`;
       }
 
-      /* ── Dynamic Time Exit: adjusted by setup quality ── */
-      if (!exitReason) {
+      /* ── Quant Tier 1: Pre-Resolution De-Risking (>= 92c Ceiling) ── */
+      if (currentMid >= 0.92) {
+        exitReason = `ALPHA_HARVEST_CEILING (>=92c, mid=${currentMid.toFixed(2)})`;
+      }
+
+      /* ── Dynamic Time Exit: adjusted by setup quality (only for non-winning markets) ── */
+      if (!exitReason && currentMid < 0.90) {
         const timeMultiplier = 0.5 + pos.setupScore; // 0.55 – 1.5×
         const dynamicTimeHours = this.cfg.time_exit_hours * timeMultiplier;
         if (hoursHeld >= dynamicTimeHours) {
@@ -409,24 +564,15 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
         }
       }
 
-      /* ── Spread widening near resolution ── */
-      if (!exitReason && market.endDate) {
-        const daysLeft = (new Date(market.endDate).getTime() - now) / 86_400_000;
-        const spreadBps = (market.spread / market.midPrice) * 10_000;
-        if (daysLeft < 1 && spreadBps > this.cfg.max_spread_bps * 2) {
-          exitReason = `NEAR_RESOLUTION_SPREAD_WIDEN (${daysLeft.toFixed(1)}d left, ${spreadBps.toFixed(0)} bps spread)`;
-        }
-      }
-
-      /* ── Adverse momentum exit: price reversing strongly against us ── */
-      if (!exitReason && entryBps < 0) {
+      /* ── Adverse momentum exit: true severe price collapse against us (>-500 bps / -5c) ── */
+      if (!exitReason && entryBps < -500 && currentMid < 0.85) {
         const clobId = market.clobTokenIds[0];
         if (clobId) {
           const hist = this.priceCache.get(clobId) ?? [];
           if (hist.length >= 10) {
             const recent5 = hist.slice(-5);
             const recentMomentum = (recent5[recent5.length - 1].price - recent5[0].price) / Math.max(0.001, recent5[0].price);
-            if (recentMomentum < -0.02 && entryBps < -50) {
+            if (recentMomentum < -0.05) {
               exitReason = `ADVERSE_MOMENTUM (bps=${entryBps.toFixed(0)}, move=${(recentMomentum * 100).toFixed(1)}%)`;
             }
           }
@@ -517,6 +663,24 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
      FILTER PIPELINE — 8 filters
      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
   private evaluateMarket(marketId: string, m: MarketData): Signal | null {
+    /* ── 0. Open Position Check: NEVER EVER buy if we already hold a position in this market ── */
+    if (this.isMarketPositionHeld(marketId, m)) {
+      return null;
+    }
+
+    /* ── 0b. Penalty Box Check (Never trade quarantined losing assets) ── */
+    if (MarketPenaltyBox.getInstance().isPenalized(marketId).penalized) {
+      return null;
+    }
+
+    // Exclude dynamic / high-fee crypto short-term markets (e.g. 15m, 1h, up-down)
+    const q = (m.question || '').toLowerCase();
+    const s = (m.slug || '').toLowerCase();
+    const isHighFeeCrypto = q.includes('15m') || q.includes('15 min') || q.includes('1 hour') || q.includes('up or down') || s.includes('updown') || s.includes('15m') || s.includes('1h');
+    if (isHighFeeCrypto) {
+      return null;
+    }
+
     const filterNames = [
       'liquidity', 'probBand', 'spread', 'timeToRes',
       'antiChase', 'flow', 'volumeTrend', 'cluster',
@@ -809,10 +973,15 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
      ENTRY PRICE — VWAP-aware passive limit
      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
-  private computeEntryPrice(m: MarketData, side: 'BUY' | 'SELL'): number {
+  private computeEntryPrice(m: MarketData, side: 'BUY' | 'SELL', outcome: 'YES' | 'NO' = 'YES'): number {
+    /* Compute outcome-specific bid, ask, and mid */
+    const outcomeBid = outcome === 'YES' ? m.bid : (1 - m.ask);
+    const outcomeAsk = outcome === 'YES' ? m.ask : (1 - m.bid);
+    const outcomeMid = outcome === 'YES' ? m.midPrice : (1 - m.midPrice);
+
     /* Compute recent VWAP as an anchor */
-    const clobId = m.clobTokenIds[0];
-    let vwap = m.midPrice;
+    const clobId = outcome === 'YES' ? m.clobTokenIds[0] : m.clobTokenIds[1];
+    let vwap = outcomeMid;
     if (clobId) {
       const hist = this.priceCache.get(clobId) ?? [];
       if (hist.length >= 5) {
@@ -822,17 +991,17 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
     }
 
     if (side === 'BUY') {
-      const passivePrice = m.bid + 0.001;
+      const passivePrice = outcomeBid + 0.001;
       const vwapCap = vwap + m.spread * 0.2; // don't overpay relative to VWAP
       let price = Math.min(passivePrice, vwapCap);
       if (this.cfg.allow_take_on_momentum) {
-        price = Math.min(m.ask, price + m.spread * 0.3);
+        price = Math.min(outcomeAsk, price + m.spread * 0.3);
       }
-      return Math.max(0.01, Math.min(m.ask - 0.001, price));
+      return Math.max(0.01, Math.min(0.75, Math.min(outcomeAsk - 0.001, price)));
     }
     // SELL side
-    const passivePrice = m.ask - 0.001;
-    return Math.max(m.bid + 0.001, passivePrice);
+    const passivePrice = outcomeAsk - 0.001;
+    return Math.max(outcomeBid + 0.001, passivePrice);
   }
 
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

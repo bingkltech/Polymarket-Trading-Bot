@@ -1,0 +1,42 @@
+rules:
+  - id: no-hardcoded-private-keys
+    patterns:
+      - pattern-regex: '(0x)?[0-9a-fA-F]{64}'
+      - pattern-not: '0x0000000000000000000000000000000000000000000000000000000000000000'
+      - pattern-not: '0x37a7fa290e8ff8c7552de159b75ef5243658ad3cc8eda4f6761105916c56bef0'
+    message: "Potential hardcoded private key or secret detected. Use environment variables or secure vault instead."
+    languages: [typescript, javascript, json, yaml]
+    severity: ERROR
+
+  - id: no-eval-with-expression
+    patterns:
+      - pattern: eval(...)
+    message: "Use of eval() is strictly prohibited due to code injection risks."
+    languages: [typescript, javascript]
+    severity: ERROR
+
+  - id: no-unsafe-dynamic-function-constructor
+    patterns:
+      - pattern: new Function(...)
+    message: "Dynamic Function constructor execution is unsafe."
+    languages: [typescript, javascript]
+    severity: ERROR
+
+  - id: require-price-bounds-on-orders
+    patterns:
+      - pattern: |
+          {
+            ...,
+            price: $PRICE,
+            ...
+          }
+      - pattern-inside: |
+          class $CLASS {
+            ...
+            sizePositions(...) {
+              ...
+            }
+          }
+    message: "Ensure order price calculation has ceiling bounds (e.g. <= 0.75 anti-steamroller)."
+    languages: [typescript]
+    severity: WARNING

@@ -74,6 +74,7 @@ export class WhaleAPI {
     this.route('GET', '/api/whales/scanner/regime', this.getRegimeState);
     this.route('GET', '/api/whales/scanner/apipool', this.getApiPoolStatus);
     this.route('GET', '/api/whales/scanner/balance/:address', this.getWalletBalance);
+    this.route('GET', '/api/whales/system/memory', this.getMemoryStatus);
 
     // Whale CRUD
     this.route('GET', '/api/whales', this.listWhales);
@@ -442,5 +443,10 @@ export class WhaleAPI {
     if (!params.address) { json(res, { error: 'address is required' }, 400); return; }
     const balance = this.service.getWalletBalance(params.address);
     json(res, { address: params.address, balanceUsdc: balance ?? null });
+  }
+
+  private async getMemoryStatus(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const memory = this.service.getMemoryStatus();
+    json(res, memory);
   }
 }

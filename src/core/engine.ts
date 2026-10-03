@@ -5,7 +5,7 @@ import { WalletManager } from '../wallets/wallet_manager';
 import { OrderRouter } from '../execution/order_router';
 import { StrategyInterface } from '../strategies/strategy_interface';
 import { STRATEGY_REGISTRY } from '../strategies/registry';
-import { AppConfig, MarketData } from '../types';
+import { AppConfig, MarketData, GroundTruthResult } from '../types';
 import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
 
@@ -21,6 +21,7 @@ export class Engine {
   private readonly clobFetcher: ClobFetcher;
   private readonly runners: StrategyRunner[] = [];
   private readonly pausedWallets = new Set<string>();
+  private isArmed = true;
 
   constructor(
     private readonly config: AppConfig,
@@ -64,6 +65,13 @@ export class Engine {
     }
 
     this.stream.on('update', (data) => this.handleMarketUpdate(data));
+    this.stream.on('snapshot', (markets: MarketData[]) => {
+      for (const runner of this.runners) {
+        if (typeof runner.strategy.syncActiveMarkets === 'function') {
+          runner.strategy.syncActiveMarkets(markets);
+        }
+      }
+    });
   }
 
   private antifreeze: any = null;
@@ -76,26 +84,35 @@ export class Engine {
       this.antifreeze.start();
     }
 
-    // "?"? PRE-TRADE RECONCILIATION: Check order limit book on network boot
-    consoleLog.info('SYSTEM', 'Initiating Pre-Trade Orderbook Reconciliation...');
-    logger.info('Engine: Fetching open orders to prevent double bets.');
+    // PRE-TRADE RECONCILIATION: Check on-chain positions and orderbook on network boot
+    consoleLog.info('SYSTEM', 'Initiating Pre-Trade Orderbook & Position Reconciliation...');
+    logger.info('Engine: Fetching open orders and positions to prevent duplicate entries.');
 
+    // 1. Await all wallets to be ready
     for (const runner of this.runners) {
-      if (runner.walletId.includes('live')) {
-        try {
-          const wallet = this.walletManager.getWallet(runner.walletId);
-          if (wallet && (wallet as any).mode === 'LIVE') {
-            consoleLog.debug('SYSTEM', `Reconciling open orders for ${runner.walletId}...`);
-            // In a full implementation, we'd call clobClient.getOpenOrders().
-            // For now, we defensively clear the memory state to ensure we don't hold stale state on reconnect.
-            if ((wallet as any).getState) {
-               ((wallet as any).getState() as any).openOrders = [];
-            }
-            this.antifreeze?.resetStrategyMemory(runner.strategy.name);
-          }
-        } catch (e) {
-          logger.error({ err: e }, `Failed to reconcile wallet ${runner.walletId}`);
+      try {
+        const wallet = this.walletManager.getWallet(runner.walletId);
+        if (wallet && typeof (wallet as any).ready === 'function') {
+          await (wallet as any).ready();
         }
+      } catch (e) {
+        logger.error({ err: e, walletId: runner.walletId }, `Failed to ready wallet ${runner.walletId}`);
+      }
+    }
+
+    // 2. Perform ground truth partition across all wallets and seed positions
+    try {
+      await this.syncAllGroundTruth();
+    } catch (e) {
+      logger.error({ err: e }, 'Failed to sync ground truth on engine start');
+    }
+
+    // 3. Reset strategy memory for live wallets if needed
+    for (const runner of this.runners) {
+      const wallet = this.walletManager.getWallet(runner.walletId);
+      if (wallet && runner.walletId.includes('live') && (wallet as any).mode === 'LIVE') {
+        consoleLog.debug('SYSTEM', `Reconciled open state for live wallet ${runner.walletId}`);
+        this.antifreeze?.resetStrategyMemory(runner.strategy.name);
       }
     }
 
@@ -155,6 +172,10 @@ export class Engine {
     strategy.initialize({ wallet: walletState, config: cfg });
 
     this.runners.push({ strategy, walletId, config: cfg });
+
+    if (walletState.openPositions && walletState.openPositions.length > 0 && typeof (strategy as any).seedPositions === 'function') {
+      (strategy as any).seedPositions(walletState.openPositions);
+    }
 
     // Back-fill cached market data so the strategy can evaluate immediately
     for (const market of this.stream.getAllMarkets()) {
@@ -238,6 +259,56 @@ export class Engine {
     return new Set(this.pausedWallets);
   }
 
+  /** Get overall armed state of the bot */
+  getIsArmed(): boolean {
+    return this.isArmed;
+  }
+
+  /** Arm the bot to execute live signals and orders */
+  arm(): void {
+    this.isArmed = true;
+    logger.info('Bot engine ARMED');
+    consoleLog.success('ENGINE', '🟢 Bot ARMED — Live signal scanning & automated order execution ACTIVE');
+  }
+
+  /** Disarm the bot into standby / safe mode (no new buy orders) */
+  disarm(): void {
+    this.isArmed = false;
+    logger.info('Bot engine DISARMED');
+    consoleLog.warn('ENGINE', '🟡 Bot DISARMED — Standby / Safe mode active (No new orders will be placed)');
+  }
+
+  /** Emergency Panic: Cancel all open orders and disarm the bot immediately */
+  async panicHalt(): Promise<{ cancelledOrders: number }> {
+    this.isArmed = false;
+    logger.warn('EMERGENCY PANIC HALT invoked on engine');
+    consoleLog.error('ENGINE', '🔴 EMERGENCY PANIC TRIGGERED! Disarming bot and cancelling all resting open orders...');
+    const cancelledOrders = await this.walletManager.cancelAllOrders();
+    consoleLog.warn('ENGINE', `Panic sweep completed: ${cancelledOrders} order(s) cancelled`);
+    return { cancelledOrders };
+  }
+
+  /** Force immediate ground truth synchronization across all wallets */
+  async syncAllGroundTruth(): Promise<GroundTruthResult[]> {
+    logger.info('Engine: Executing full Ground Truth synchronization across all wallets...');
+    consoleLog.info('SYSTEM', '🔄 Syncing Ground Truth with Polymarket (Balances, Positions, Open Orders, Trades)...');
+
+    const results = await this.walletManager.syncAllGroundTruth();
+
+    // Re-seed strategies with updated live positions if needed
+    for (const runner of this.runners) {
+      const wallet = this.walletManager.getWallet(runner.walletId);
+      if (wallet) {
+        const positions = wallet.getState().openPositions;
+        if (positions && typeof (runner.strategy as any).seedPositions === 'function') {
+          (runner.strategy as any).seedPositions(positions);
+        }
+      }
+    }
+
+    return results;
+  }
+
   private tickCount = 0;
   private marketUpdateCount = 0;
   private lastScanLog = 0;
@@ -245,10 +316,23 @@ export class Engine {
   private async tick(): Promise<void> {
     this.tickCount++;
 
-    // Log a periodic scan summary every 12 ticks (~60 s at 5 s interval)
+    // Periodic ground truth sync and memory health every 12 ticks (~60 s at 5 s interval)
     if (this.tickCount % 12 === 0) {
-      consoleLog.debug('ENGINE', `Tick #${this.tickCount} — ${this.runners.length} runners, ${this.stream.getAllMarkets().length} cached markets, ${this.marketUpdateCount} updates since last summary`);
+      const mem = process.memoryUsage();
+      const heapMb = (mem.heapUsed / 1024 / 1024).toFixed(1);
+      const rssMb = (mem.rss / 1024 / 1024).toFixed(1);
+      consoleLog.debug('ENGINE', `Tick #${this.tickCount} — ${this.runners.length} runners, ${this.stream.getAllMarkets().length} active markets | Mem: ${heapMb}MB Heap, ${rssMb}MB RSS`);
       this.marketUpdateCount = 0;
+
+      // Background ground truth sync (non-blocking)
+      this.syncAllGroundTruth().catch((err) => {
+        logger.warn({ err }, 'Background ground truth sync error');
+      });
+
+      // Optional garbage collection if exposed
+      if (this.tickCount % 60 === 0 && typeof (global as any).gc === 'function') {
+        (global as any).gc();
+      }
     }
 
     for (const runner of this.runners) {
@@ -257,6 +341,7 @@ export class Engine {
       await this.processSignals(runner);
     }
   }
+
 
   private handleMarketUpdate(data: MarketData): void {
     this.marketUpdateCount++;
@@ -276,7 +361,39 @@ export class Engine {
     }
   }
 
+  private lastInsufficientLog = new Map<string, number>();
+
   private async processSignals(runner: StrategyRunner): Promise<void> {
+    // If bot is DISARMED, skip signal generation and order placement (safe standby mode)
+    if (!this.isArmed) {
+      return;
+    }
+
+    const wallet = this.walletManager.getWallet(runner.walletId);
+    const currentState = wallet?.getState();
+    const available = currentState?.availableBalance ?? 0;
+
+    // Keep strategy context strictly synchronized with real-time wallet state
+    if (currentState && runner.strategy.context) {
+      runner.strategy.context.wallet = currentState;
+    }
+
+    // Resource & Capital Optimizer: If wallet has insufficient funds (< $2.00) to place a minimum 5-share order,
+    // gracefully halt buy-signal scanning to conserve CPU/RAM and prevent redundant risk rejections.
+    // Asset management (exits, take-profit, trailing stop, and harvest) runs continuously via onTimer().
+    if (available < 2.00) {
+      const now = Date.now();
+      const last = this.lastInsufficientLog.get(runner.walletId) ?? 0;
+      if (now - last > 300_000) { // Log once every 5 minutes
+        logger.info(
+          { walletId: runner.walletId, strategy: runner.strategy.name, availableBalance: available },
+          `Capital Optimizer: Available balance ($${available.toFixed(2)}) < $2.00 minimum lot. Pausing buy scanning to conserve resources; focusing 100% on asset management & exits.`
+        );
+        this.lastInsufficientLog.set(runner.walletId, now);
+      }
+      return;
+    }
+
     const signals = await runner.strategy.generateSignals();
     if (signals.length > 0) {
       consoleLog.info('SIGNAL', `[${runner.strategy.name}] Generated ${signals.length} signal(s) for wallet ${runner.walletId}`, {

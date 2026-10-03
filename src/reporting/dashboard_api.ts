@@ -20,8 +20,10 @@ export interface WalletDashboardEntry {
   displayName: string;
   mode: 'LIVE' | 'PAPER';
   strategy: string;
-  capitalAllocated: number;
-  availableBalance: number;
+  capitalAllocated: number; // Strategy Budget
+  availableBalance: number; // Polymarket Cash (Free USDC)
+  engagedCapital: number;   // Cash engaged in open positions
+  portfolioValue: number;   // Total Portfolio Value (Cash + Positions MTM)
   realizedPnl: number;
   unrealizedPnl: number;
   totalPnl: number;
@@ -46,8 +48,12 @@ export interface WalletDashboardEntry {
 
 export interface DashboardPayload {
   generatedAt: string;
-  totalCapital: number;
-  totalBalance: number;
+  polymarketCash: number;   // Free liquid USDC on Polymarket
+  engagedCapital: number;   // Capital currently in active positions
+  portfolioValue: number;   // Total Portfolio Value (Cash + Current Positions MTM)
+  totalBudget: number;      // Configured strategy budget ceiling
+  totalCapital: number;     // Legacy alias for totalBudget
+  totalBalance: number;     // Legacy alias for polymarketCash
   totalPnl: number;
   totalRealizedPnl: number;
   totalUnrealizedPnl: number;
@@ -55,30 +61,46 @@ export interface DashboardPayload {
   wallets: WalletDashboardEntry[];
 }
 
+
 export function computePerformance(
   wallet: WalletState,
   trades: TradeRecord[],
   unrealizedPnl: number,
+  openPositions?: Array<{ unrealizedPnl: number; size: number }>,
 ): PerformanceSnapshot {
-  // Compute real win rate from actual trades
-  const wins = trades.filter((t) => t.realizedPnl > 0);
-  const losses = trades.filter((t) => t.realizedPnl < 0);
-  const closedTrades = wins.length + losses.length;
-  const winRate = closedTrades > 0 ? wins.length / closedTrades : 0;
+  // Only evaluate closed round trips (SELL trades) or trades with non-zero realized PnL
+  const closedTradesList = trades.filter((t) => t.side === 'SELL' || t.realizedPnl !== 0);
+  const closedWins = closedTradesList.filter((t) => t.realizedPnl > 0);
+  const closedLosses = closedTradesList.filter((t) => t.realizedPnl < 0);
+  
+  // Count mark-to-market active open positions to prevent showing 100% win rate when open trades are losing
+  const openWins = (openPositions ?? []).filter((p) => p.size > 0 && p.unrealizedPnl > 0).length;
+  const openLosses = (openPositions ?? []).filter((p) => p.size > 0 && p.unrealizedPnl < 0).length;
 
-  const totalWinPnl = wins.reduce((s, t) => s + t.realizedPnl, 0);
-  const totalLossPnl = losses.reduce((s, t) => s + t.realizedPnl, 0);
-  const avgWin = wins.length > 0 ? totalWinPnl / wins.length : 0;
-  const avgLoss = losses.length > 0 ? totalLossPnl / losses.length : 0;
+  const totalEvaluatedPositions = closedWins.length + closedLosses.length + openWins + openLosses;
+  const totalWinningEvaluated = closedWins.length + openWins;
+  
+  // Mark-to-market comprehensive win rate
+  const winRate = totalEvaluatedPositions > 0 
+    ? totalWinningEvaluated / totalEvaluatedPositions 
+    : (closedTradesList.length > 0 ? closedWins.length / closedTradesList.length : 0);
+
+  const totalWinPnl = closedWins.reduce((s, t) => s + t.realizedPnl, 0);
+  const totalLossPnl = closedLosses.reduce((s, t) => s + t.realizedPnl, 0);
+  const avgWin = closedWins.length > 0 ? totalWinPnl / closedWins.length : 0;
+  const avgLoss = closedLosses.length > 0 ? totalLossPnl / closedLosses.length : 0;
+  
+  const totalPnl = wallet.realizedPnl + unrealizedPnl;
+  
+  // Profit factor is undefined/0 if total PnL is negative or no closed losses exist when losing
   const profitFactor =
-    losses.length > 0 && totalLossPnl !== 0
+    closedLosses.length > 0 && totalLossPnl !== 0
       ? Math.abs(totalWinPnl / totalLossPnl)
-      : wins.length > 0
+      : closedWins.length > 0 && totalPnl > 0
         ? Infinity
         : 0;
 
   // Sharpe-like ratio: PnL / capital
-  const totalPnl = wallet.realizedPnl + unrealizedPnl;
   const sharpeLike = Number(
     (totalPnl / Math.max(1, wallet.capitalAllocated)).toFixed(4),
   );
@@ -89,13 +111,13 @@ export function computePerformance(
     unrealizedPnl,
     totalPnl,
     winRate: Number(winRate.toFixed(4)),
-    winCount: wins.length,
-    lossCount: losses.length,
+    winCount: totalWinningEvaluated,
+    lossCount: closedLosses.length + openLosses,
     avgWin: Number(avgWin.toFixed(4)),
     avgLoss: Number(avgLoss.toFixed(4)),
     profitFactor: profitFactor === Infinity ? 999 : Number(profitFactor.toFixed(4)),
     sharpeLike,
-    totalTrades: trades.length,
+    totalTrades: closedTradesList.length > 0 ? closedTradesList.length : trades.length,
   };
 }
 
@@ -109,16 +131,22 @@ export function buildDashboardPayload(
   const entries: WalletDashboardEntry[] = wallets.map((w) => {
     const trades = tradesByWallet.get(w.walletId) ?? [];
 
-    // Compute unrealized PnL for each open position (skip zero-size)
+    // Compute unrealized PnL and market values for each open position (skip zero-size)
     let walletUnrealizedPnl = 0;
+    let walletCostBasis = 0;
+    let walletMarketValue = 0;
+
     const positions = w.openPositions.filter((p) => p.size > 0).map((p) => {
-      // Use live market price if available, otherwise use avgPrice (no unrealized PnL)
-      const currentPrice = marketPrices?.get(p.marketId) ?? p.avgPrice;
+      // Use live market price if available, otherwise curPrice or avgPrice
+      const currentPrice = marketPrices?.get(p.marketId) ?? p.curPrice ?? p.avgPrice;
       const unrealizedPnl =
         p.size > 0 && p.avgPrice > 0
           ? (currentPrice - p.avgPrice) * p.size
           : 0;
       walletUnrealizedPnl += unrealizedPnl;
+      walletCostBasis += (p.size * p.avgPrice);
+      walletMarketValue += (p.size * currentPrice);
+
       return {
         marketId: p.marketId,
         outcome: p.outcome,
@@ -129,6 +157,9 @@ export function buildDashboardPayload(
       };
     });
 
+    const engagedCapital = Number(walletCostBasis.toFixed(4));
+    const portfolioValue = Number((w.availableBalance + walletMarketValue).toFixed(4));
+
     return {
       walletId: w.walletId,
       displayName: displayNames?.get(w.walletId) ?? w.walletId,
@@ -136,28 +167,50 @@ export function buildDashboardPayload(
       strategy: w.assignedStrategy,
       capitalAllocated: w.capitalAllocated,
       availableBalance: Number(w.availableBalance.toFixed(4)),
+      engagedCapital,
+      portfolioValue,
       realizedPnl: Number(w.realizedPnl.toFixed(4)),
       unrealizedPnl: Number(walletUnrealizedPnl.toFixed(4)),
       totalPnl: Number((w.realizedPnl + walletUnrealizedPnl).toFixed(4)),
       paused: pausedWallets?.has(w.walletId) ?? false,
       openPositions: positions,
       riskLimits: w.riskLimits,
-      performance: computePerformance(w, trades, walletUnrealizedPnl),
+      performance: computePerformance(w, trades, walletUnrealizedPnl, positions),
     };
   });
 
   const liveEntries = entries.filter(e => e.mode === 'LIVE');
   const totalRealizedPnl = liveEntries.reduce((s, e) => s + e.realizedPnl, 0);
   const totalUnrealizedPnl = liveEntries.reduce((s, e) => s + e.unrealizedPnl, 0);
+  
+  // When live sub-wallets share the same underlying Polymarket account balance:
+  // True Polymarket Free Cash is the maximum onChainBalance (or availableBalance) across live wallets
+  const liveOnChainBalances = wallets.filter(w => w.mode === 'LIVE').map(w => w.onChainBalance ?? w.availableBalance);
+  const totalCash = liveOnChainBalances.length > 0 
+    ? Math.max(...liveOnChainBalances)
+    : 0;
+
+  const totalEngaged = Number(liveEntries.reduce((s, e) => s + e.engagedCapital, 0).toFixed(4));
+  const totalMarketValue = liveEntries.reduce((s, e) => {
+    const posVal = e.openPositions.reduce((ps, p) => ps + (p.size * (p.avgPrice + (p.unrealizedPnl / Math.max(p.size, 1)))), 0);
+    return s + posVal;
+  }, 0);
+  const totalPortfolio = Number((totalCash + totalMarketValue).toFixed(4));
+  const totalBudget = liveEntries.reduce((s, e) => s + e.capitalAllocated, 0);
 
   return {
     generatedAt: new Date().toISOString(),
-    totalCapital: liveEntries.reduce((s, e) => s + e.capitalAllocated, 0),
-    totalBalance: Number(liveEntries.reduce((s, e) => s + e.availableBalance, 0).toFixed(4)),
+    polymarketCash: Number(totalCash.toFixed(4)),
+    engagedCapital: totalEngaged,
+    portfolioValue: totalPortfolio,
+    totalBudget,
+    totalCapital: totalBudget, // Legacy compatibility
+    totalBalance: Number(totalCash.toFixed(4)), // Legacy compatibility
     totalPnl: Number((totalRealizedPnl + totalUnrealizedPnl).toFixed(4)),
     totalRealizedPnl: Number(totalRealizedPnl.toFixed(4)),
     totalUnrealizedPnl: Number(totalUnrealizedPnl.toFixed(4)),
     activeWallets: liveEntries.length,
-    wallets: liveEntries, // Completely exclude paper wallets from the dashboard UI
+    wallets: liveEntries, // Exclude paper wallets from the dashboard UI
   };
 }
+

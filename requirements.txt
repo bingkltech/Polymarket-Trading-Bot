@@ -1,0 +1,2 @@
+# Static Analysis & Security Requirements
+semgrep>=1.179.0

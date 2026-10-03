@@ -14,7 +14,12 @@
     "test": "vitest run",
     "lint": "eslint . --ext .ts",
     "format": "prettier --check .",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "semgrep": "semgrep scan --config .semgrep.yml src/",
+    "security:scan": "semgrep scan --config .semgrep.yml src/",
+    "ocr": "ocr",
+    "ocr:review": "ocr review",
+    "ocr:scan": "ocr scan src/"
   },
   "dependencies": {
     "@polymarket/clob-client": "^5.8.1",
@@ -28,6 +33,7 @@
     "yaml": "^2.4.5"
   },
   "devDependencies": {
+    "@alibaba-group/open-code-review": "^1.12.11",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.2",
     "@typescript-eslint/eslint-plugin": "^8.8.1",
