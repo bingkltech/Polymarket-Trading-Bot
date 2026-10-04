@@ -18,7 +18,7 @@ const DEFAULTS: ConvergenceConfig = {
   min_prob: 0.55,
   max_prob: 0.75,
   max_spread_bps: 120,
-  max_days_to_resolution: 7,
+  max_days_to_resolution: 3,
   spike_pct: 0.05,
   spike_lookback_minutes: 60,
   min_depth_usd_within_1pct: 1_000,
@@ -680,6 +680,15 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
     if (isHighFeeCrypto) {
       return null;
     }
+
+    const isIlliquidEsports = q.includes('lol:') || q.includes('dota') || q.includes('esport') || q.includes('game 4') || q.includes('game 5') || q.includes('map handicap') || s.includes('lol') || s.includes('esports');
+    if (isIlliquidEsports) return null;
+
+    const isMinorTennis = q.includes('w15') || q.includes('w25') || q.includes('w35') || q.includes('m15') || q.includes('m25') || q.includes('itf') || s.includes('itf');
+    if (isMinorTennis) return null;
+
+    const isLongHorizonPolitics = q.includes('presidential election') || q.includes('mayoral') || q.includes('prime minister') || q.includes('called by') || q.includes('next brazil') || q.includes('2026') || q.includes('2027') || q.includes('2028');
+    if (isLongHorizonPolitics) return null;
 
     const filterNames = [
       'liquidity', 'probBand', 'spread', 'timeToRes',

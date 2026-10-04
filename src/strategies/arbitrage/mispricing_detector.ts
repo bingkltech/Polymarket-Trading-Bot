@@ -16,8 +16,8 @@ import { logger } from '../../reporting/logs';
    6. Spread-aware position management with grace periods to avoid immediate stop-outs
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
-const MIN_VOLUME = 2500;
-const MIN_LIQUIDITY = 1000;
+const MIN_VOLUME = 5000;
+const MIN_LIQUIDITY = 2000;
 const STALE_MS = 300_000; // 5 minutes (avoids dropping active live books)
 const MIN_DISLOCATION = 0.03; // Minimum 3 cents edge required
 const MAX_CONFIDENCE = 0.95;
@@ -559,18 +559,21 @@ export class MispricingArbitrageStrategy extends BaseStrategy {
     const isHighFeeCrypto = q.includes('15m') || q.includes('15 min') || q.includes('1 hour') || q.includes('up or down') || s.includes('updown') || s.includes('15m') || s.includes('1h');
     if (isHighFeeCrypto) return false;
 
-    // Exclude negative-EV sports props (Over/Unders, First TD, Player Props)
-    const isSportsProp = q.includes('o/u ') || q.includes('over/under') || q.includes('total-') || q.includes('totals-') || q.includes('first td') || q.includes('player props') || s.includes('totals') || s.includes('player-props');
-    if (isSportsProp) return false;
+    // Category Blacklist: Exclude volatile live esports, low-tier tennis, multi-year politics, and negative EV props
+    const isIlliquidEsports = q.includes('lol:') || q.includes('dota') || q.includes('esport') || q.includes('game 4') || q.includes('game 5') || q.includes('map handicap') || s.includes('lol') || s.includes('esports');
+    if (isIlliquidEsports) return false;
 
-    // Exclude illiquid multi-month political nominations
-    const isIlliquidPolitics = q.includes('mayoral') || q.includes('prime minister') || q.includes('presidential election') || q.includes('called by');
-    if (isIlliquidPolitics) return false;
+    const isMinorTennis = q.includes('w15') || q.includes('w25') || q.includes('w35') || q.includes('m15') || q.includes('m25') || q.includes('itf') || s.includes('itf');
+    if (isMinorTennis) return false;
 
-    // 7-Day Resolution Horizon Gate: Exclude events resolving further than 7 days out
+    // Exclude multi-year / forward political nominations and elections (> 72h)
+    const isLongHorizonPolitics = q.includes('presidential election') || q.includes('mayoral') || q.includes('prime minister') || q.includes('called by') || q.includes('next brazil') || q.includes('2026') || q.includes('2027') || q.includes('2028');
+    if (isLongHorizonPolitics) return false;
+
+    // Strict 72-Hour Resolution Horizon Gate: Only trade events resolving within 3 days (high capital velocity)
     if (!market.endDate) return false;
     const daysLeft = (new Date(market.endDate).getTime() - now) / 86_400_000;
-    if (daysLeft <= 0 || daysLeft > 7) return false;
+    if (daysLeft <= 0 || daysLeft > 3.0) return false;
 
     // Reject markets experiencing violent 5c price spikes (adverse selection)
     if (this.isAdverseSpike(market.marketId)) return false;

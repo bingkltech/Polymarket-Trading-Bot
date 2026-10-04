@@ -100,16 +100,23 @@ export class SpreadStrategy extends BaseStrategy {
       // 0. Single-Position Rule: Skip markets where we already hold an open position
       if (this.isMarketPositionHeld(market.marketId, market)) continue;
 
-      // 0a. Exclude dynamic / high-fee crypto short-term markets (e.g. 15m, 1h, up-down)
-      const q = (market.question || '').toLowerCase();
-      const s = (market.slug || '').toLowerCase();
+      // 0a. Exclude dynamic / high-fee crypto, minor esports, low-tier tennis, multi-year politics
       const isHighFeeCrypto = q.includes('15m') || q.includes('15 min') || q.includes('1 hour') || q.includes('up or down') || s.includes('updown') || s.includes('15m') || s.includes('1h');
       if (isHighFeeCrypto) continue;
 
-      // 0b. 7-Day Resolution Horizon: Exclude events resolving further than 7 days out
+      const isIlliquidEsports = q.includes('lol:') || q.includes('dota') || q.includes('esport') || q.includes('game 4') || q.includes('game 5') || q.includes('map handicap') || s.includes('lol') || s.includes('esports');
+      if (isIlliquidEsports) continue;
+
+      const isMinorTennis = q.includes('w15') || q.includes('w25') || q.includes('w35') || q.includes('m15') || q.includes('m25') || q.includes('itf') || s.includes('itf');
+      if (isMinorTennis) continue;
+
+      const isLongHorizonPolitics = q.includes('presidential election') || q.includes('mayoral') || q.includes('prime minister') || q.includes('called by') || q.includes('next brazil') || q.includes('2026') || q.includes('2027') || q.includes('2028');
+      if (isLongHorizonPolitics) continue;
+
+      // 0b. Strict 72-Hour Resolution Horizon: Exclude events resolving further than 3 days out
       if (!market.endDate) continue;
       const daysLeft = (new Date(market.endDate).getTime() - Date.now()) / 86_400_000;
-      if (daysLeft <= 0 || daysLeft > 7) continue;
+      if (daysLeft <= 0 || daysLeft > 3.0) continue;
 
       const yesPrice = market.outcomePrices[0] ?? 0.50;
       const leadingProb = Math.max(yesPrice, 1 - yesPrice);

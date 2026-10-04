@@ -425,6 +425,33 @@ export class Engine {
     }
 
     for (const order of orders) {
+      // Global Cross-Wallet Single-Position Veto:
+      // Ensure that across ALL wallets in the platform, we never exceed 1 position (5 shares) per market
+      if (order.side === 'BUY') {
+        const allPositions = this.walletManager.listWallets().flatMap((w) => w.getState().openPositions);
+        const isGloballyHeld = allPositions.some((p) => {
+          if (p.size <= 0) return false;
+          if (p.marketId === order.marketId) return true;
+          const m = this.stream?.getMarket(order.marketId);
+          if (m) {
+            const target = p.marketId.toLowerCase();
+            if (m.marketId && m.marketId.toLowerCase() === target) return true;
+            if (m.conditionId && m.conditionId.toLowerCase() === target) return true;
+            if (m.slug && m.slug.toLowerCase() === target) return true;
+            if (m.clobTokenIds && m.clobTokenIds.some((t) => t.toLowerCase() === target)) return true;
+          }
+          return false;
+        });
+        if (isGloballyHeld) {
+          logger.warn(
+            { walletId: order.walletId, marketId: order.marketId, strategy: order.strategy },
+            'Global Engine Veto: Market is already held by a wallet in the platform. Aborting duplicate BUY.'
+          );
+          consoleLog.warn('ORDER', `Global Veto: Aborted duplicate BUY for market ${order.marketId} — already held in platform.`);
+          continue;
+        }
+      }
+
       try {
         const executed = await this.orderRouter.route(order);
         if (executed) {
