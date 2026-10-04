@@ -15,8 +15,8 @@ export class Scheduler {
     this.timer = setInterval(async () => {
       try {
         await handler();
-      } catch (error) {
-        logger.error({ error }, 'Scheduler tick failed');
+      } catch (error: any) {
+        logger.error({ err: error?.stack || error?.message || String(error) }, 'Scheduler tick failed');
       }
     }, this.intervalMs);
     logger.info({ intervalMs: this.intervalMs }, 'Scheduler started');
