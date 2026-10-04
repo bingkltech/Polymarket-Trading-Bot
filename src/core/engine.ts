@@ -460,7 +460,7 @@ export class Engine {
           }
         }
 
-        const allPositions = this.walletManager.listWallets().flatMap((w) => w.getState().openPositions);
+        const allPositions = this.walletManager.listWallets().flatMap((w) => w.openPositions ?? []);
         const isGloballyHeld = allPositions.some((p) => {
           if (p.size <= 0) return false;
           if (p.marketId === order.marketId) return true;
