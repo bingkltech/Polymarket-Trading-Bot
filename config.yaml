@@ -89,3 +89,7 @@ whale_tracking:
     cross_ref_max_per_batch: 5
     cluster_detection_enabled: true
 
+dashboard:
+  port: 3002
+
+

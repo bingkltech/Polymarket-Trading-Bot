@@ -195,11 +195,11 @@ program
     for (const wallet of config.wallets) {
       walletManager.registerWallet(wallet, wallet.strategy, config.environment.enableLiveTrading);
     }
-    const dashboardPort = Number(process.env.DASHBOARD_PORT ?? 3000);
+    /* ── Whale Tracking Engine & Config ── */
+    const rawConfig = YAML.parse(fs.readFileSync(options.config, 'utf8')) as Record<string, unknown>;
+    const dashboardPort = Number(process.env.DASHBOARD_PORT ?? (rawConfig.dashboard as any)?.port ?? 3002);
     const dashboardServer = new DashboardServer(walletManager, dashboardPort);
 
-    /* ── Whale Tracking Engine ── */
-    const rawConfig = YAML.parse(fs.readFileSync(options.config, 'utf8')) as Record<string, unknown>;
     const whaleConfigRaw = (rawConfig.whale_tracking ?? {}) as Record<string, unknown>;
     const whaleConfig = buildWhaleConfig(whaleConfigRaw);
     logger.info({
