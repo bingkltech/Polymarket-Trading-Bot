@@ -799,6 +799,22 @@ export function getPocketCockpitHtml(): string {
       </div>
     </div>
 
+    <!-- 🏛️ Quant Council Deliberations Stream -->
+    <div class="deck-panel expandable" id="councilPanel">
+      <div class="deck-header">
+        <div style="display:flex; align-items:center; gap:6px;">
+          <span>🏛️</span>
+          <span>Quant Council Stream (TradingAgent + Red Team)</span>
+        </div>
+        <span id="councilBadge" style="font-size:0.68rem; color:var(--cyan); font-family:'JetBrains Mono', monospace;">0 EVALUATED</span>
+      </div>
+      <div id="councilList" style="display:flex; flex-direction:column; gap:8px;">
+        <div style="text-align:center; padding:10px; color:var(--text-muted); font-size:0.75rem; font-style:italic;">
+          Quant Council standing by for active market deliberation.
+        </div>
+      </div>
+    </div>
+
     <!-- 4-Tier Alpha Harvester & Active Positions Deck -->
     <div class="deck-panel expandable">
       <div class="deck-header">
@@ -1346,6 +1362,44 @@ export function getPocketCockpitHtml(): string {
       } catch(e) {}
     }
 
+    /* ─── Quant Council Deliberations Fetching ─── */
+    async function loadCouncilDeliberations() {
+      try {
+        const res = await fetch('/api/council/deliberations');
+        const d = await res.json();
+        const records = d.deliberations || [];
+        const container = document.getElementById('councilList');
+        const badge = document.getElementById('councilBadge');
+
+        if (badge) {
+          badge.textContent = records.length + ' EVALUATED';
+        }
+
+        if (records.length === 0) {
+          container.innerHTML = '<div style="text-align:center; padding:10px; color:var(--text-muted); font-size:0.75rem; font-style:italic;">Quant Council standing by for active market deliberation.</div>';
+          return;
+        }
+
+        let html = '';
+        for (const r of records.slice(0, 5)) {
+          const isApp = r.consensus.verdict === 'APPROVED';
+          const verdictCls = isApp ? 'badge-yes' : 'badge-no';
+          
+          html += '<div class="pos-item" style="border-left: 3px solid ' + (isApp ? 'var(--green)' : 'var(--red)') + ';">' +
+            '<div class="pos-row-top">' +
+              '<span class="pos-title-link" style="font-size:0.75rem;">' + r.question + '</span>' +
+              '<span class="pos-badge ' + verdictCls + '">' + r.consensus.verdict + ' (' + r.consensus.overallScore + '/100)</span>' +
+            '</div>' +
+            '<div style="font-size:0.68rem; color:var(--text-muted); line-height:1.35; display:flex; flex-direction:column; gap:3px;">' +
+              '<div><strong style="color:var(--cyan);">🧠 Quant Lead:</strong> ' + r.quantValuation.summary + '</div>' +
+              '<div><strong style="color:' + (r.redTeamAudit.passed ? 'var(--green)' : 'var(--red)') + ';">🛡️ Red Team:</strong> ' + r.redTeamAudit.critique + '</div>' +
+            '</div>' +
+          '</div>';
+        }
+        container.innerHTML = html;
+      } catch(e) {}
+    }
+
     /* ─── Polling & Real-time SSE ─── */
     async function refresh() {
       try {
@@ -1358,6 +1412,7 @@ export function getPocketCockpitHtml(): string {
         setArmStateUI(st.isArmed);
         renderAll(d);
         loadOpenOrders();
+        loadCouncilDeliberations();
       } catch(e) {
         console.error('Refresh failed', e);
       }
@@ -1386,6 +1441,7 @@ export function getPocketCockpitHtml(): string {
     refresh();
     initSSE();
     setInterval(loadOpenOrders, 4000);
+    setInterval(loadCouncilDeliberations, 4000);
     setInterval(refresh, 5000);
   </script>
 </body>

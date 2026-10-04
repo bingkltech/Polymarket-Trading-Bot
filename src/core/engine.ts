@@ -8,6 +8,7 @@ import { STRATEGY_REGISTRY } from '../strategies/registry';
 import { AppConfig, MarketData, GroundTruthResult } from '../types';
 import { logger } from '../reporting/logs';
 import { consoleLog } from '../reporting/console_log';
+import { QuantCouncilEngine } from './quant_council';
 
 interface StrategyRunner {
   strategy: StrategyInterface;
@@ -21,6 +22,7 @@ export class Engine {
   private readonly clobFetcher: ClobFetcher;
   private readonly runners: StrategyRunner[] = [];
   private readonly pausedWallets = new Set<string>();
+  private readonly quantCouncil = QuantCouncilEngine.getInstance();
   private isArmed = true;
 
   constructor(
@@ -259,6 +261,11 @@ export class Engine {
     return new Set(this.pausedWallets);
   }
 
+  /** Get Quant Council Engine instance */
+  getQuantCouncil(): QuantCouncilEngine {
+    return this.quantCouncil;
+  }
+
   /** Get overall armed state of the bot */
   getIsArmed(): boolean {
     return this.isArmed;
@@ -437,6 +444,20 @@ export class Engine {
           );
           consoleLog.warn('ORDER', `Global Veto: Aborted BUY @ $${order.price.toFixed(2)} on ${order.marketId} — price >= $0.85 violates Anti-Steamroller Rule.`);
           continue;
+        }
+
+        // Quant Council Deliberation Pass:
+        const market = this.stream?.getMarket(order.marketId);
+        if (market) {
+          const deliberation = this.quantCouncil.deliberate(market);
+          if (deliberation.consensus.verdict === 'VETOED') {
+            logger.warn(
+              { walletId: order.walletId, marketId: order.marketId, strategy: order.strategy, reasons: deliberation.consensus.vetoReasons },
+              'Quant Council VETO: Market setup rejected by council deliberation.'
+            );
+            consoleLog.warn('COUNCIL', `[VETOED] ${order.marketId.slice(0, 10)}…: ${deliberation.consensus.vetoReasons.join(', ')}`);
+            continue;
+          }
         }
 
         const allPositions = this.walletManager.listWallets().flatMap((w) => w.getState().openPositions);

@@ -5,11 +5,12 @@ import { MarketFetcher } from '../data/market_fetcher';
 import { buildDashboardPayload } from './dashboard_api';
 import { listStrategies } from '../strategies/registry';
 import { logger } from './logs';
-import { consoleLog } from './console_log';
 import type { WhaleAPI } from '../whales/whale_api';
 import type { Engine } from '../core/engine';
 import { CopyTradeStrategy } from '../strategies/copy_trading/copy_trade_strategy';
+import { consoleLog } from './console_log';
 import { getPocketCockpitHtml } from './pocket_cockpit_html';
+import { QuantCouncilEngine } from '../core/quant_council';
 
 /* ──────────────────────────────────────────────────────────────
    Strategy catalog — rich metadata used by the Strategies tab
@@ -840,6 +841,27 @@ export class DashboardServer {
         isArmed,
         uptime: process.uptime(),
         timestamp: Date.now(),
+      });
+      return;
+    }
+
+    /* ─── JSON: Quant Council Deliberations ─── */
+    if (path === '/api/council/deliberations' && method === 'GET') {
+      const council = this.engine ? this.engine.getQuantCouncil() : QuantCouncilEngine.getInstance();
+      json(res, 200, {
+        ok: true,
+        deliberations: council.getRecentDeliberations(),
+        stats: council.getStats(),
+      });
+      return;
+    }
+
+    /* ─── JSON: Quant Council Stats ─── */
+    if (path === '/api/council/stats' && method === 'GET') {
+      const council = this.engine ? this.engine.getQuantCouncil() : QuantCouncilEngine.getInstance();
+      json(res, 200, {
+        ok: true,
+        stats: council.getStats(),
       });
       return;
     }
