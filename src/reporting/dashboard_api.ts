@@ -24,6 +24,7 @@ export interface WalletDashboardEntry {
   availableBalance: number; // Polymarket Cash (Free USDC)
   engagedCapital: number;   // Cash engaged in open positions
   portfolioValue: number;   // Total Portfolio Value (Cash + Positions MTM)
+  marketValue?: number;     // Current market value of open positions
   realizedPnl: number;
   unrealizedPnl: number;
   totalPnl: number;
@@ -49,7 +50,9 @@ export interface WalletDashboardEntry {
 export interface DashboardPayload {
   generatedAt: string;
   polymarketCash: number;   // Free liquid USDC on Polymarket
-  engagedCapital: number;   // Capital currently in active positions
+  engagedCapital: number;   // Capital currently in active positions (cost basis)
+  activePositionsValue?: number; // Total current mark value of active positions
+  totalCostBasis?: number;  // Cost basis of all active positions
   portfolioValue: number;   // Total Portfolio Value (Cash + Current Positions MTM)
   totalBudget: number;      // Configured strategy budget ceiling
   totalCapital: number;     // Legacy alias for totalBudget
@@ -57,6 +60,7 @@ export interface DashboardPayload {
   totalPnl: number;
   totalRealizedPnl: number;
   totalUnrealizedPnl: number;
+  netRoiPct?: number;       // Net ROI percentage relative to budget
   activeWallets: number;
   wallets: WalletDashboardEntry[];
 }
@@ -158,6 +162,7 @@ export function buildDashboardPayload(
     });
 
     const engagedCapital = Number(walletCostBasis.toFixed(4));
+    const marketValue = Number(walletMarketValue.toFixed(4));
     const portfolioValue = Number((w.availableBalance + walletMarketValue).toFixed(4));
 
     return {
@@ -168,6 +173,7 @@ export function buildDashboardPayload(
       capitalAllocated: w.capitalAllocated,
       availableBalance: Number(w.availableBalance.toFixed(4)),
       engagedCapital,
+      marketValue,
       portfolioValue,
       realizedPnl: Number(w.realizedPnl.toFixed(4)),
       unrealizedPnl: Number(walletUnrealizedPnl.toFixed(4)),
@@ -197,18 +203,23 @@ export function buildDashboardPayload(
   }, 0);
   const totalPortfolio = Number((totalCash + totalMarketValue).toFixed(4));
   const totalBudget = liveEntries.reduce((s, e) => s + e.capitalAllocated, 0);
+  const totalPnl = Number((totalRealizedPnl + totalUnrealizedPnl).toFixed(4));
+  const netRoiPct = totalBudget > 0 ? Number(((totalPnl / totalBudget) * 100).toFixed(2)) : 0;
 
   return {
     generatedAt: new Date().toISOString(),
     polymarketCash: Number(totalCash.toFixed(4)),
     engagedCapital: totalEngaged,
+    activePositionsValue: Number(totalMarketValue.toFixed(4)),
+    totalCostBasis: totalEngaged,
     portfolioValue: totalPortfolio,
     totalBudget,
     totalCapital: totalBudget, // Legacy compatibility
     totalBalance: Number(totalCash.toFixed(4)), // Legacy compatibility
-    totalPnl: Number((totalRealizedPnl + totalUnrealizedPnl).toFixed(4)),
+    totalPnl,
     totalRealizedPnl: Number(totalRealizedPnl.toFixed(4)),
     totalUnrealizedPnl: Number(totalUnrealizedPnl.toFixed(4)),
+    netRoiPct,
     activeWallets: liveEntries.length,
     wallets: liveEntries, // Exclude paper wallets from the dashboard UI
   };

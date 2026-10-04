@@ -2618,23 +2618,25 @@ function barCls(r){return r<.6?'bar-ok':r<.85?'bar-warn':'bar-danger'}
 
 /* ─── Dashboard Tab ─── */
 function renderSummary(d){
-  const rPnl = d.totalRealizedPnl || d.totalPnl || 0;
+  const rPnl = d.totalRealizedPnl || 0;
   const uPnl = d.totalUnrealizedPnl || 0;
-  const tPnl = d.totalPnl || 0;
+  const tPnl = d.totalPnl !== undefined ? d.totalPnl : (rPnl + uPnl);
   const cash = d.polymarketCash !== undefined ? d.polymarketCash : (d.totalBalance || 0);
   const engaged = d.engagedCapital !== undefined ? d.engagedCapital : 0;
-  const portfolio = d.portfolioValue !== undefined ? d.portfolioValue : (cash + uPnl);
+  const activeVal = d.activePositionsValue !== undefined ? d.activePositionsValue : (d.portfolioValue ? Math.max(0, d.portfolioValue - cash) : 0);
+  const portfolio = d.portfolioValue !== undefined ? d.portfolioValue : (cash + activeVal);
   const budget = d.totalBudget !== undefined ? d.totalBudget : (d.totalCapital || 0);
+  const roiPct = budget > 0 ? ((tPnl / budget) * 100).toFixed(1) : '0.0';
 
   $('#summary').innerHTML=
-    '<div class="s-card"><div class="label">Polymarket Cash (Free)</div><div class="value" style="color:var(--green)">$'+fmt(cash,2)+'</div></div>'+
-    '<div class="s-card"><div class="label">Engaged Capital</div><div class="value">$'+fmt(engaged,2)+'</div></div>'+
-    '<div class="s-card"><div class="label">Total Portfolio Value</div><div class="value" style="color:var(--accent)">$'+fmt(portfolio,2)+'</div></div>'+
-    '<div class="s-card"><div class="label">Strategy Budget</div><div class="value">$'+fmt(budget,0)+'</div></div>'+
+    '<div class="s-card" style="border-color:rgba(79,143,247,0.35); background:linear-gradient(135deg, var(--surface) 0%, #152238 100%)"><div class="label" style="display:flex;justify-content:space-between"><span>Net Portfolio Value</span><span class="'+pnlCls(tPnl)+'" style="font-weight:800">'+(tPnl>=0?'+':'')+roiPct+'% ROI</span></div><div class="value" style="color:#ffffff; font-size:28px">$'+fmt(portfolio,2)+'</div></div>'+
+    '<div class="s-card"><div class="label">Liquid Cash (Polygon USDC)</div><div class="value" style="color:var(--green)">$'+fmt(cash,2)+'</div></div>'+
+    '<div class="s-card"><div class="label">Active Holdings (MTM)</div><div class="value" style="color:var(--accent)">$'+fmt(activeVal,2)+'</div></div>'+
+    '<div class="s-card"><div class="label">Invested Cost Basis</div><div class="value">$'+fmt(engaged,2)+'</div></div>'+
     '<div class="s-card"><div class="label">Realized PnL</div><div class="value '+pnlCls(rPnl)+'">$'+fmt(rPnl)+'</div></div>'+
     '<div class="s-card"><div class="label">Unrealized PnL</div><div class="value '+pnlCls(uPnl)+'">$'+fmt(uPnl)+'</div></div>'+
-    '<div class="s-card"><div class="label">Total PnL</div><div class="value '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+
-    '<div class="s-card"><div class="label">Active Wallets</div><div class="value">'+d.activeWallets+'</div></div>';
+    '<div class="s-card"><div class="label">Total Alpha PnL</div><div class="value '+pnlCls(tPnl)+'">$'+fmt(tPnl)+'</div></div>'+
+    '<div class="s-card"><div class="label">Strategy Bankroll Target</div><div class="value">$'+fmt(budget,0)+'</div></div>';
 }
 
 function renderWallets(wl){
