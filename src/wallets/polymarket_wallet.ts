@@ -640,7 +640,14 @@ export class PolymarketWallet {
       const existingPos = this.state.openPositions.find(
         (p) => p.marketId === request.marketId && p.outcome === request.outcome
       );
-      const heldSize = existingPos ? existingPos.size : size;
+      if (!existingPos || existingPos.size <= 0) {
+        logger.warn(
+          { walletId: this.state.walletId, marketId: request.marketId, outcome: request.outcome },
+          'Cannot place LIVE SELL order: Wallet holds no open position in this market.'
+        );
+        return;
+      }
+      const heldSize = existingPos.size;
       const lockedSellShares = this.openOrders
         .filter((o) => (o.asset_id === tokenId || o.market === request.marketId) && (o.side === 'SELL' || String(o.side).toUpperCase() === 'SELL'))
         .reduce((sum, o) => sum + (parseFloat(o.original_size || o.size || '0') - parseFloat(o.size_matched || '0')), 0);

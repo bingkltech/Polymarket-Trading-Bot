@@ -109,9 +109,16 @@ export abstract class BaseStrategy implements StrategyInterface {
     const now = Date.now();
     const walletId = this.context?.wallet.walletId ?? 'unknown';
 
-    // Filter out signals for markets still in cooldown or already held in wallet
+    // Filter out signals:
+    // - BUY: Skip if market is already held in wallet (Single-Position Rule)
+    // - SELL: Skip if market is NOT held in wallet (prevent naked sells)
+    // - Cooldown: Skip if traded recently
     const filtered = signals.filter((s) => {
-      if (this.isMarketPositionHeld(s.marketId)) {
+      const held = this.isMarketPositionHeld(s.marketId);
+      if (s.side === 'BUY' && held) {
+        return false;
+      }
+      if (s.side === 'SELL' && !held) {
         return false;
       }
       const key = `${s.marketId}:${s.outcome}:${s.side}`;
