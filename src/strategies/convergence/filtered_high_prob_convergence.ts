@@ -15,8 +15,8 @@ import { MarketPenaltyBox } from '../../learning/penalty_box';
 const DEFAULTS: ConvergenceConfig = {
   enabled: true,
   min_liquidity_usd: 5_000,
-  min_prob: 0.70,
-  max_prob: 0.92,
+  min_prob: 0.68,
+  max_prob: 0.84,
   max_spread_bps: 150,
   max_days_to_resolution: 3,
   spike_pct: 0.05,

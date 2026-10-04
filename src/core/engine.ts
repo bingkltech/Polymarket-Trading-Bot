@@ -428,6 +428,17 @@ export class Engine {
       // Global Cross-Wallet Single-Position Veto:
       // Ensure that across ALL wallets in the platform, we never exceed 1 position (5 shares) per market
       if (order.side === 'BUY') {
+        // Universal Anti-Steamroller Engine Guard:
+        // Strictly prohibit ANY BUY order with price >= $0.85 across all strategies
+        if (order.price >= 0.85) {
+          logger.warn(
+            { walletId: order.walletId, marketId: order.marketId, price: order.price, strategy: order.strategy },
+            'Global Anti-Steamroller Veto: BUY price >= $0.85 is strictly prohibited (toxic asymmetric risk).'
+          );
+          consoleLog.warn('ORDER', `Global Veto: Aborted BUY @ $${order.price.toFixed(2)} on ${order.marketId} — price >= $0.85 violates Anti-Steamroller Rule.`);
+          continue;
+        }
+
         const allPositions = this.walletManager.listWallets().flatMap((w) => w.getState().openPositions);
         const isGloballyHeld = allPositions.some((p) => {
           if (p.size <= 0) return false;
