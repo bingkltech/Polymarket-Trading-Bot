@@ -15,24 +15,24 @@ import { MarketPenaltyBox } from '../../learning/penalty_box';
 const DEFAULTS: ConvergenceConfig = {
   enabled: true,
   min_liquidity_usd: 5_000,
-  min_prob: 0.55,
-  max_prob: 0.75,
-  max_spread_bps: 120,
+  min_prob: 0.70,
+  max_prob: 0.92,
+  max_spread_bps: 150,
   max_days_to_resolution: 3,
   spike_pct: 0.05,
   spike_lookback_minutes: 60,
-  min_depth_usd_within_1pct: 1_000,
-  min_imbalance: 0.12,
+  min_depth_usd_within_1pct: 500,
+  min_imbalance: 0.05,
   flow_lookback_minutes: 15,
-  min_net_buy_flow_usd: 200,
+  min_net_buy_flow_usd: 100,
   max_correlated_exposure_pct: 0.30,
   base_risk_pct: 0.20,
   max_position_usd_per_market: 5,
   max_total_open_positions: 6,
   ttl_seconds: 120,
   allow_take_on_momentum: false,
-  take_profit_bps: 150,
-  stop_loss_bps: 250,
+  take_profit_bps: 600,
+  stop_loss_bps: 800,
   time_exit_hours: 48,
   max_daily_loss_pct: 0.65,
   max_weekly_drawdown_pct: 0.65,
@@ -282,7 +282,7 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
   private computeCompositeRank(m: MarketData | undefined, s: Signal): number {
     if (!m) return s.confidence;
 
-    // 1. High Probability of Winning Factor (0.55 - 0.75 band * setup confidence)
+    // 1. High Probability of Winning Factor (Golden 0.70 - 0.92 band * setup confidence)
     const leadingProb = Math.max(m.midPrice, 1 - m.midPrice);
     const winProbFactor = leadingProb * (0.5 + s.confidence * 0.5);
 
@@ -292,27 +292,16 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
     // 3. Liquidity Factor (log10 scaled)
     const liqFactor = Math.log10(Math.max(1000, m.liquidity));
 
-    // 4. Volatility Factor (daily change, weekly change, or rolling price stdDev)
-    const dailyChange = Math.abs(m.oneDayPriceChange ?? 0);
-    const weeklyChange = Math.abs(m.oneWeekPriceChange ?? 0);
-    const spreadBps = (m.spread / Math.max(0.001, m.midPrice)) * 10_000;
-
-    let rollingVol = 0;
-    const clobId = m.clobTokenIds?.[0];
-    if (clobId) {
-      const hist = this.priceCache.get(clobId);
-      if (hist && hist.length >= 4) {
-        const prices = hist.map((p) => p.price);
-        const mean = prices.reduce((a, b) => a + b, 0) / prices.length;
-        const variance = prices.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / prices.length;
-        rollingVol = Math.sqrt(variance);
-      }
+    // 4. Implied Yield / Rapid Time-Decay APY Factor
+    let yieldFactor = 1.0;
+    if (m.endDate) {
+      const daysLeft = Math.max(0.05, (new Date(m.endDate).getTime() - Date.now()) / 86_400_000);
+      const impliedReturn = (1.00 - leadingProb) / Math.max(0.01, leadingProb);
+      const annualizedApy = impliedReturn * (365 / daysLeft);
+      yieldFactor = 1 + Math.min(3.0, annualizedApy / 2.0);
     }
 
-    const volatility = Math.max(0.005, dailyChange, weeklyChange / 2, rollingVol, spreadBps / 10_000);
-    const volatilityMultiplier = 1 + Math.min(2.0, volatility * 10);
-
-    return winProbFactor * volFactor * liqFactor * volatilityMultiplier;
+    return winProbFactor * volFactor * liqFactor * yieldFactor;
   }
 
   /**
@@ -379,8 +368,10 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
 
       /* Entry price calculated and rounded to 2 decimal places for Polymarket CLOB */
       const rawPrice = this.computeEntryPrice(market, order.side, order.outcome);
-      const entryPrice = Math.max(0.01, Math.min(0.75, Number((Math.round(rawPrice * 100) / 100).toFixed(2))));
-      if (entryPrice > 0.75) continue; // Anti-Steamroller Guardrail
+      const maxAllowedProb = this.cfg.max_prob ?? 0.92;
+      const minAllowedProb = this.cfg.min_prob ?? 0.70;
+      const entryPrice = Math.max(0.01, Math.min(maxAllowedProb, Number((Math.round(rawPrice * 100) / 100).toFixed(2))));
+      if (entryPrice > maxAllowedProb || entryPrice < minAllowedProb) continue; // Golden Band Guardrail
 
       /* Base size scaled by score, respecting wallet limits */
       const baseUsd = capital * (this.cfg.base_risk_pct ?? 0.05);
@@ -532,27 +523,27 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
         continue;
       }
 
-      /* ── Trailing Take Profit: once past TP level, trail from peak ── */
-      if (pos.peakBps >= this.cfg.take_profit_bps) {
+      /* ── Quant Tier 1: Parity Harvest (>= 97c Ceiling) ── */
+      if (currentMid >= 0.97) {
+        exitReason = `ALPHA_HARVEST_PARITY (>=97c, mid=${currentMid.toFixed(2)})`;
+      }
+
+      /* ── Trailing Take Profit: once past TP level and in high confidence zone, trail from peak ── */
+      if (!exitReason && pos.peakBps >= this.cfg.take_profit_bps && currentMid >= 0.92) {
         const pullback = pos.peakBps - entryBps;
         if (pullback >= this.TRAILING_STOP_PULLBACK_BPS) {
           exitReason = `TRAILING_TP (peak +${pos.peakBps.toFixed(0)} bps, pullback -${pullback.toFixed(0)} bps)`;
         }
       }
 
-      /* ── Hard Take Profit: exit remaining at 3× TP (prevent round-tripping) ── */
-      if (!exitReason && entryBps >= this.cfg.take_profit_bps * 3) {
+      /* ── Hard Take Profit: exit remaining at 1500 bps (+15c) gain ── */
+      if (!exitReason && entryBps >= 1500) {
         exitReason = `HARD_TP (+${entryBps.toFixed(0)} bps)`;
       }
 
       /* ── Stop Loss ── */
       if (!exitReason && entryBps <= -this.cfg.stop_loss_bps) {
         exitReason = `STOP_LOSS (${entryBps.toFixed(0)} bps)`;
-      }
-
-      /* ── Quant Tier 1: Pre-Resolution De-Risking (>= 92c Ceiling) ── */
-      if (currentMid >= 0.92) {
-        exitReason = `ALPHA_HARVEST_CEILING (>=92c, mid=${currentMid.toFixed(2)})`;
       }
 
       /* ── Dynamic Time Exit: adjusted by setup quality (only for non-winning markets) ── */
@@ -1006,7 +997,8 @@ export class FilteredHighProbConvergenceStrategy extends BaseStrategy {
       if (this.cfg.allow_take_on_momentum) {
         price = Math.min(outcomeAsk, price + m.spread * 0.3);
       }
-      return Math.max(0.01, Math.min(0.75, Math.min(outcomeAsk - 0.001, price)));
+      const maxAllowed = this.cfg.max_prob ?? 0.92;
+      return Math.max(0.01, Math.min(maxAllowed, Math.min(outcomeAsk - 0.001, price)));
     }
     // SELL side
     const passivePrice = outcomeAsk - 0.001;
