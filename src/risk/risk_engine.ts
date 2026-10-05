@@ -48,9 +48,9 @@ export class RiskEngine {
         return { ok: false, reason: `Size Rule Veto: Order size ${order.size} exceeds maximum 5 shares` };
       }
 
-      // 1. Anti-Steamroller Guardrail: Prohibit buying contracts above 75¢ (no 76¢-99¢ asymmetric risk/reward traps)
-      if (order.price > 0.75) {
-        return { ok: false, reason: `Anti-Steamroller Guardrail: Price $${order.price.toFixed(2)} exceeds 75¢ entry ceiling (EV protection)` };
+      // 1. Anti-Steamroller Guardrail: Prohibit buying contracts at or above 85¢ (toxic asymmetric risk/reward traps)
+      if (order.price >= 0.85) {
+        return { ok: false, reason: `Anti-Steamroller Guardrail: Price $${order.price.toFixed(2)} exceeds 84¢ entry ceiling (EV protection)` };
       }
 
       const orderCost = order.price * order.size;

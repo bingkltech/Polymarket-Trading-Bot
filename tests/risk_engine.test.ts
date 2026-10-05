@@ -46,17 +46,17 @@ describe('RiskEngine', () => {
     expect(result.ok).toBe(false);
   });
 
-  it('rejects BUY orders with price > 0.75 (Anti-Steamroller Guardrail)', () => {
+  it('rejects BUY orders with price >= 0.85 (Anti-Steamroller Guardrail)', () => {
     const engine = new RiskEngine(new KillSwitch());
-    const steamrollerOrder: OrderRequest = { ...order, price: 0.76 };
+    const steamrollerOrder: OrderRequest = { ...order, price: 0.85 };
     const result = engine.check(steamrollerOrder, walletState);
     expect(result.ok).toBe(false);
     expect(result.reason).toContain('Anti-Steamroller Guardrail');
 
-    // Also test that 0.65 is allowed for positive-EV value trades
-    const valueOrder: OrderRequest = { ...order, price: 0.65 };
-    const valueResult = engine.check(valueOrder, walletState);
-    expect(valueResult.ok).toBe(true);
+    // Also test that 0.82 is allowed for positive-EV Golden Band trades
+    const goldenBandOrder: OrderRequest = { ...order, price: 0.82 };
+    const goldenResult = engine.check(goldenBandOrder, walletState);
+    expect(goldenResult.ok).toBe(true);
   });
 
   it('rejects BUY orders with size > 5 shares (Fixed 5 shares rule)', () => {
