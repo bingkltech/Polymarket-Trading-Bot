@@ -5,48 +5,48 @@ wallets:
   - id: "Convergence-Live"
     mode: LIVE
     strategy: filtered_high_prob_convergence
-    capital: 15
+    capital: 20
     risk_limits:
       max_position_size: 5
-      max_exposure_per_market: 10
-      max_daily_loss: 9.75
-      max_open_trades: 5
-      max_drawdown: 0.65
+      max_exposure_per_market: 5
+      max_daily_loss: 6.5
+      max_open_trades: 4
+      max_drawdown: 0.25
 
   - id: "Mispricing-Live"
     mode: LIVE
     strategy: mispricing_arbitrage
-    capital: 10
+    capital: 6
     risk_limits:
       max_position_size: 5
-      max_exposure_per_market: 10
-      max_daily_loss: 6.5
-      max_open_trades: 5
-      max_drawdown: 0.65
+      max_exposure_per_market: 5
+      max_daily_loss: 3.0
+      max_open_trades: 2
+      max_drawdown: 0.25
 
   - id: "CopyTrade-Live"
     mode: LIVE
     strategy: copy_trade
-    capital: 10
+    capital: 6
     risk_limits:
       max_position_size: 5
-      max_exposure_per_market: 10
-      max_daily_loss: 6.5
-      max_open_trades: 5
-      max_drawdown: 0.65
+      max_exposure_per_market: 5
+      max_daily_loss: 3.0
+      max_open_trades: 2
+      max_drawdown: 0.25
 
 strategy_config:
   filtered_high_prob_convergence:
     enabled: true
-    min_prob: 0.68
+    min_prob: 0.72
     max_prob: 0.84
     min_liquidity_usd: 5000
-    max_spread_bps: 150
-    max_days_to_resolution: 3
-    max_position_usd_per_market: 5
-    max_total_open_positions: 6
-    max_daily_loss_pct: 0.65
-    max_weekly_drawdown_pct: 0.65
+    max_spread_bps: 100
+    max_days_to_resolution: 2
+    max_position_usd_per_market: 4.5
+    max_total_open_positions: 4
+    max_daily_loss_pct: 0.25
+    max_weekly_drawdown_pct: 0.35
   mispricing_arbitrage:
     min_dislocation: 0.03
   market_making:
